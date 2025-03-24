@@ -150,6 +150,86 @@ class GitHubOrgLister:
         logger.info(f"Found {len(all_repos)} repositories for organization {org_name}")
         return all_repos
     
+    def get_org_security_alerts(self, org_name: str, alert_type: str) -> List[Dict[str, Any]]:
+        """
+        Get security alerts for an organization.
+        
+        Args:
+            org_name: Organization name
+            alert_type: Type of alerts to get ("dependabot", "code-scanning", "secret-scanning")
+            
+        Returns:
+            List of security alerts
+        """
+        # Map alert types to API endpoints and operations
+        alert_endpoints = {
+            "dependabot": {
+                "endpoint": f"{self.base_url}/orgs/{org_name}/dependabot/alerts",
+                "operation": "org_dependabot"
+            },
+            "code-scanning": {
+                "endpoint": f"{self.base_url}/orgs/{org_name}/code-scanning/alerts",
+                "operation": "org_code_scanning"
+            },
+            "secret-scanning": {
+                "endpoint": f"{self.base_url}/orgs/{org_name}/secret-scanning/alerts",
+                "operation": "org_secret_scanning"
+            }
+        }
+        
+        if alert_type not in alert_endpoints:
+            logger.error(f"Invalid alert type: {alert_type}")
+            return []
+        
+        endpoint = alert_endpoints[alert_type]["endpoint"]
+        operation = alert_endpoints[alert_type]["operation"]
+        
+        # Get token with appropriate permissions
+        token = self.token_manager.get_token_for_operation(operation)
+        
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        all_alerts = []
+        page = 1
+        per_page = 100
+        
+        while True:
+            try:
+                response = requests.get(
+                    endpoint,
+                    headers=headers,
+                    params={"state": "open", "page": page, "per_page": per_page}
+                )
+                
+                # Update rate limit info after request
+                self.token_manager.update_rate_limit_from_response(token, response)
+                
+                if response.status_code == 200:
+                    alerts_page = response.json()
+                    if not alerts_page:
+                        break
+                        
+                    all_alerts.extend(alerts_page)
+                    
+                    # Check if we need to get the next page
+                    if len(alerts_page) < per_page:
+                        break
+                        
+                    page += 1
+                else:
+                    logger.error(f"Failed to get {alert_type} alerts for {org_name}. Status code: {response.status_code}")
+                    # Don't log potentially sensitive security information
+                    break
+            except Exception as e:
+                logger.error(f"Error getting {alert_type} alerts: {str(e)}")
+                break
+        
+        logger.info(f"Found {len(all_alerts)} {alert_type} alerts for organization {org_name}")
+        return all_alerts
+    
     def get_workflow_runs(self, owner: str, repo: str) -> List[Dict[str, Any]]:
         """
         Get workflow runs for a repository.
@@ -185,43 +265,6 @@ class GitHubOrgLister:
                 return []
         except Exception as e:
             logger.error(f"Error getting workflow runs: {str(e)}")
-            return []
-    
-    def get_security_alerts(self, owner: str, repo: str) -> List[Dict[str, Any]]:
-        """
-        Get security alerts for a repository.
-        
-        Args:
-            owner: Repository owner (user or organization)
-            repo: Repository name
-            
-        Returns:
-            List of security alerts
-        """
-        # Get token with security_events permission
-        token = self.token_manager.get_token_for_operation("security_alerts")
-        
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        try:
-            response = requests.get(
-                f"{self.base_url}/repos/{owner}/{repo}/vulnerability-alerts",
-                headers=headers
-            )
-            
-            # Update rate limit info
-            self.token_manager.update_rate_limit_from_response(token, response)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.error(f"Failed to get security alerts. Status code: {response.status_code}")
-                return []
-        except Exception as e:
-            logger.error(f"Error getting security alerts: {str(e)}")
             return []
     
     def get_organization_runners(self, org: str) -> List[Dict[str, Any]]:

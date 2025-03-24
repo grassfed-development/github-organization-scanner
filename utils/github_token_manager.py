@@ -31,8 +31,12 @@ class GitHubTokenManager:
         
         # Security operations
         "security_alerts": ["security_events", "repo"],
+        "org_security_alerts": ["security_events", "repo"],
         "code_scanning": ["security_events", "repo"],
+        "org_code_scanning": ["security_events", "repo"],
         "dependabot": ["repo"],
+        "org_dependabot": ["repo"],
+        "org_secret_scanning": ["security_events", "repo"],
         
         # Copilot operations
         "copilot_settings": ["copilot", "manage_billing:copilot"],

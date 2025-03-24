@@ -1,6 +1,7 @@
 import requests
 import logging
 import time
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +16,11 @@ class GitHubClient:
         self.base_url = 'https://api.github.com'
         logger.info(f"Initialized GitHub client for organization: {org}")
         
-    def make_request(self, url, method="GET", expect_404=False):
+    def make_request(self, url, method="GET", expect_404=False, data=None):
         """Make API request with rate limit handling"""
         logger.debug(f"Requesting: {url}")
         while True:
-            response = requests.request(method, url, headers=self.headers)
+            response = requests.request(method, url, headers=self.headers, json=data)
             
             # Check rate limits
             remaining = int(response.headers.get('X-RateLimit-Remaining', 0))
@@ -51,29 +52,64 @@ class GitHubClient:
                 logger.error(f"Response: {response.text[:200]}...")
                 return response
     
-    def get_all_repositories(self):
-        """Get all repositories in the organization"""
-        logger.info(f"Fetching repositories for {self.org}...")
-        repos = []
+    def get_paginated_results(self, url, max_pages=None):
+        """Get all paginated results for an endpoint"""
+        results = []
         page = 1
+        
         while True:
-            url = f'{self.base_url}/orgs/{self.org}/repos?page={page}&per_page=100'
-            response = self.make_request(url)
+            # Add page parameter if it's not already in the URL
+            if '?' in url:
+                paginated_url = f"{url}&page={page}"
+            else:
+                paginated_url = f"{url}?page={page}"
+                
+            response = self.make_request(paginated_url)
             
             if response.status_code != 200:
-                logger.error(f"Error fetching repositories: {response.status_code}")
+                logger.error(f"Error fetching paginated results: {response.status_code}")
                 break
+                
+            data = response.json()
             
-            batch = response.json()
+            # Handle different response formats (array or object with items)
+            if isinstance(data, list):
+                batch = data
+            elif isinstance(data, dict) and 'items' in data:
+                batch = data['items']
+            else:
+                batch = []
+                
             if not batch:
                 break
                 
-            repos.extend(batch)
-            logger.info(f"Retrieved page {page}, found {len(batch)} repositories")
+            results.extend(batch)
+            logger.info(f"Retrieved page {page}, found {len(batch)} items")
+            
+            # Check if there are more pages
+            if 'Link' not in response.headers:
+                break
+                
+            # Parse Link header to check for next page
+            link_header = response.headers['Link']
+            if 'rel="next"' not in link_header:
+                break
+                
             page += 1
             
-        logger.info(f"Total repositories found: {len(repos)}")
-        return repos
+            # Stop if we've reached the maximum number of pages
+            if max_pages and page > max_pages:
+                logger.info(f"Reached maximum number of pages ({max_pages})")
+                break
+                
+        logger.info(f"Total items found: {len(results)}")
+        return results
+    
+    def get_all_repositories(self):
+        """Get all repositories in the organization"""
+        logger.info(f"Fetching repositories for {self.org}...")
+        url = f'{self.base_url}/orgs/{self.org}/repos?per_page=100'
+        return self.get_paginated_results(url)
     
     def get_rate_limit(self):
         """Get current rate limit status"""
@@ -82,4 +118,12 @@ class GitHubClient:
         if response.status_code == 200:
             limits = response.json()
             return limits.get('resources', {}).get('core', {})
+        return None
+        
+    def get_organization_info(self):
+        """Get information about the organization"""
+        url = f'{self.base_url}/orgs/{self.org}'
+        response = self.make_request(url)
+        if response.status_code == 200:
+            return response.json()
         return None

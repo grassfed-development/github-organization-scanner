@@ -13,6 +13,32 @@ class GitHubSecurityAnalyzer(BaseScanner):
         github_client = GitHubClient(token, org)
         super().__init__(github_client, storage_client)
     
+    def get_org_security_advisories(self):
+        """Get security advisories at the organization level"""
+        url = f'{self.github_client.base_url}/orgs/{self.org}/security-advisories'
+        response = self.github_client.make_request(url, expect_404=True)
+        
+        if response.status_code != 200:
+            logger.warning(f"Unable to fetch organization-level security advisories for {self.org}")
+            return []
+            
+        return response.json()
+        
+    def get_org_dependabot_alerts(self):
+        """Get all Dependabot alerts for the organization"""
+        url = f'{self.github_client.base_url}/orgs/{self.org}/dependabot/alerts?state=open&per_page=100'
+        return self.github_client.get_paginated_results(url)
+        
+    def get_org_secret_scanning_alerts(self):
+        """Get all secret scanning alerts for the organization"""
+        url = f'{self.github_client.base_url}/orgs/{self.org}/secret-scanning/alerts?state=open&per_page=100'
+        return self.github_client.get_paginated_results(url)
+    
+    def get_org_code_scanning_alerts(self):
+        """Get all code scanning alerts for the organization"""
+        url = f'{self.github_client.base_url}/orgs/{self.org}/code-scanning/alerts?state=open&per_page=100'
+        return self.github_client.get_paginated_results(url)
+    
     def check_security_features(self, repo_name):
         """Check security features enabled for a repository"""
         url = f'{self.github_client.base_url}/repos/{self.org}/{repo_name}/security-and-analysis'
@@ -45,36 +71,6 @@ class GitHubSecurityAnalyzer(BaseScanner):
             
         return response.json().get('enabled', False)
 
-    def get_secret_scanning_alerts(self, repo_name):
-        """Get secret scanning alerts for a repository"""
-        url = f'{self.github_client.base_url}/repos/{self.org}/{repo_name}/secret-scanning/alerts?state=open&per_page=100'
-        response = self.github_client.make_request(url, expect_404=True)
-        
-        if response.status_code != 200:
-            return []
-            
-        return response.json()
-
-    def get_code_scanning_alerts(self, repo_name):
-        """Get code scanning alerts for a repository"""
-        url = f'{self.github_client.base_url}/repos/{self.org}/{repo_name}/code-scanning/alerts?state=open&per_page=100'
-        response = self.github_client.make_request(url, expect_404=True)
-        
-        if response.status_code != 200:
-            return []
-            
-        return response.json()
-
-    def get_dependabot_alerts(self, repo_name):
-        """Get Dependabot alerts for a repository"""
-        url = f'{self.github_client.base_url}/repos/{self.org}/{repo_name}/dependabot/alerts?state=open&per_page=100'
-        response = self.github_client.make_request(url, expect_404=True)
-        
-        if response.status_code != 200:
-            return []
-            
-        return response.json()
-
     def scan(self):
         """Analyze security status across all repositories"""
         repos = self.github_client.get_all_repositories()
@@ -106,15 +102,82 @@ class GitHubSecurityAnalyzer(BaseScanner):
             'repositories': []
         }
         
+        # Get organization-level alerts first (more efficient)
+        logger.info(f"Fetching organization-level alerts for {self.org}...")
+        
+        # Get all dependabot alerts at organization level
+        dependabot_alerts = self.get_org_dependabot_alerts()
+        logger.info(f"Retrieved {len(dependabot_alerts)} organization-level Dependabot alerts")
+        
+        # Get all secret scanning alerts at organization level
+        secret_alerts = self.get_org_secret_scanning_alerts()
+        logger.info(f"Retrieved {len(secret_alerts)} organization-level Secret Scanning alerts")
+        
+        # Get all code scanning alerts at organization level
+        code_alerts = self.get_org_code_scanning_alerts()
+        logger.info(f"Retrieved {len(code_alerts)} organization-level Code Scanning alerts")
+        
+        # Create dictionaries for quick lookups by repository
+        repo_to_dependabot_alerts = {}
+        repo_to_secret_alerts = {}
+        repo_to_code_alerts = {}
+        
+        # Process dependabot alerts by repository
+        for alert in dependabot_alerts:
+            repo_name = alert.get('repository', {}).get('name')
+            if repo_name:
+                if repo_name not in repo_to_dependabot_alerts:
+                    repo_to_dependabot_alerts[repo_name] = []
+                repo_to_dependabot_alerts[repo_name].append(alert)
+        
+        # Process secret scanning alerts by repository
+        for alert in secret_alerts:
+            repo_name = alert.get('repository', {}).get('name')
+            if repo_name:
+                if repo_name not in repo_to_secret_alerts:
+                    repo_to_secret_alerts[repo_name] = []
+                repo_to_secret_alerts[repo_name].append(alert)
+        
+        # Process code scanning alerts by repository
+        for alert in code_alerts:
+            repo_name = alert.get('repository', {}).get('name')
+            if repo_name:
+                if repo_name not in repo_to_code_alerts:
+                    repo_to_code_alerts[repo_name] = []
+                repo_to_code_alerts[repo_name].append(alert)
+        
+        # Update alert counts
+        security_data['alert_counts']['repositories_with_secret_alerts'] = len(repo_to_secret_alerts)
+        security_data['alert_counts']['repositories_with_code_alerts'] = len(repo_to_code_alerts)
+        security_data['alert_counts']['repositories_with_dependabot_alerts'] = len(repo_to_dependabot_alerts)
+        security_data['alert_counts']['total_secret_scanning_alerts'] = len(secret_alerts)
+        security_data['alert_counts']['total_code_scanning_alerts'] = len(code_alerts)
+        security_data['alert_counts']['total_dependabot_alerts'] = len(dependabot_alerts)
+        
         # Counters for aggregation
         secret_types = Counter()
         code_alert_rules = Counter()
         dependabot_packages = Counter()
         dependabot_severities = Counter()
         
+        # Process alerts for reporting
+        for alert in secret_alerts:
+            secret_types[alert.get('secret_type', 'unknown')] += 1
+            
+        for alert in code_alerts:
+            rule = alert.get('rule', {}).get('id', 'unknown')
+            code_alert_rules[rule] += 1
+            
+        for alert in dependabot_alerts:
+            package = alert.get('dependency', {}).get('package', {}).get('name', 'unknown')
+            severity = alert.get('security_advisory', {}).get('severity', 'unknown')
+            dependabot_packages[package] += 1
+            dependabot_severities[severity] += 1
+        
+        # Now process repositories for security features
         for repo in repos:
             repo_name = repo['name']
-            logger.info(f"Analyzing security for {repo_name}... ({repos.index(repo) + 1}/{len(repos)})")
+            logger.info(f"Analyzing security features for {repo_name}... ({repos.index(repo) + 1}/{len(repos)})")
             
             repo_data = {
                 'name': repo_name,
@@ -122,9 +185,9 @@ class GitHubSecurityAnalyzer(BaseScanner):
                 'private': repo['private'],
                 'security_features': {},
                 'alerts': {
-                    'secret_scanning': [],
-                    'code_scanning': [],
-                    'dependabot': []
+                    'secret_scanning': repo_to_secret_alerts.get(repo_name, []),
+                    'code_scanning': repo_to_code_alerts.get(repo_name, []),
+                    'dependabot': repo_to_dependabot_alerts.get(repo_name, [])
                 }
             }
             
@@ -151,47 +214,6 @@ class GitHubSecurityAnalyzer(BaseScanner):
                 security_data['security_features']['vulnerability_alerts_enabled'] += 1
             if repo_data['security_features']['automated_security_fixes']:
                 security_data['security_features']['automated_security_fixes_enabled'] += 1
-            
-            # Get alerts if features are enabled
-            if repo_data['security_features']['secret_scanning']:
-                secret_alerts = self.get_secret_scanning_alerts(repo_name)
-                repo_data['alerts']['secret_scanning'] = secret_alerts
-                
-                if secret_alerts:
-                    security_data['alert_counts']['repositories_with_secret_alerts'] += 1
-                    security_data['alert_counts']['total_secret_scanning_alerts'] += len(secret_alerts)
-                    
-                    # Count secret types
-                    for alert in secret_alerts:
-                        secret_types[alert.get('secret_type', 'unknown')] += 1
-            
-            if repo_data['security_features']['advanced_security']:
-                code_alerts = self.get_code_scanning_alerts(repo_name)
-                repo_data['alerts']['code_scanning'] = code_alerts
-                
-                if code_alerts:
-                    security_data['alert_counts']['repositories_with_code_alerts'] += 1
-                    security_data['alert_counts']['total_code_scanning_alerts'] += len(code_alerts)
-                    
-                    # Count rule types
-                    for alert in code_alerts:
-                        rule = alert.get('rule', {}).get('id', 'unknown')
-                        code_alert_rules[rule] += 1
-            
-            if repo_data['security_features']['vulnerability_alerts']:
-                dependabot_alerts = self.get_dependabot_alerts(repo_name)
-                repo_data['alerts']['dependabot'] = dependabot_alerts
-                
-                if dependabot_alerts:
-                    security_data['alert_counts']['repositories_with_dependabot_alerts'] += 1
-                    security_data['alert_counts']['total_dependabot_alerts'] += len(dependabot_alerts)
-                    
-                    # Count package and severity
-                    for alert in dependabot_alerts:
-                        package = alert.get('dependency', {}).get('package', {}).get('name', 'unknown')
-                        severity = alert.get('security_advisory', {}).get('severity', 'unknown')
-                        dependabot_packages[package] += 1
-                        dependabot_severities[severity] += 1
             
             # Add to repository list
             security_data['repositories'].append(repo_data)
