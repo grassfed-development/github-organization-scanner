@@ -8,9 +8,26 @@ from scanners.base_scanner import BaseScanner
 logger = logging.getLogger(__name__)
 
 class GitHubSecurityAnalyzer(BaseScanner):
-    def __init__(self, token, org, storage_client=None, repo_limit=0):
-        # Initialize GitHub client
-        github_client = GitHubClient(token, org)
+    def __init__(self, token=None, org=None, storage_client=None, repo_limit=0, client=None):
+        """
+        Initialize GitHubSecurityAnalyzer with either a GitHub client or token/org pair.
+        
+        Args:
+            token: GitHub token (legacy mode)
+            org: GitHub organization name (legacy mode)
+            storage_client: Optional cloud storage client
+            repo_limit: Maximum number of repositories to scan (0 = no limit)
+            client: Pre-configured GitHubClient instance (preferred)
+        """
+        # Use provided GitHub client or create one
+        if client:
+            github_client = client
+            self.org = client.org
+        else:
+            # Legacy mode - create client with token
+            github_client = GitHubClient(token, org)
+            self.org = org
+            
         super().__init__(github_client, storage_client)
         self.repo_limit = repo_limit
     
@@ -119,7 +136,7 @@ class GitHubSecurityAnalyzer(BaseScanner):
         # Get organization-level alerts first (more efficient)
         logger.info(f"Fetching organization-level alerts for {self.org}...")
         
-# Get all dependabot alerts at organization level
+        # Get all dependabot alerts at organization level
         try:
             dependabot_alerts = self.github_client.get_org_dependabot_alerts()
             logger.info(f"Retrieved {len(dependabot_alerts)} organization-level Dependabot alerts")

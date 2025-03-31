@@ -2,27 +2,74 @@ import requests
 import logging
 import time
 import re
+from typing import Dict, List, Optional, Any
+
+from utils.github_token_manager import GitHubTokenManager
 
 logger = logging.getLogger(__name__)
 
 class GitHubClient:
-    def __init__(self, token, org):
-        self.token = token
+    def __init__(self, token=None, org=None, token_manager=None, tokens_by_scope=None, base_url='https://api.github.com'):
+        """
+        Initialize GitHub client with either a single token or a token manager.
+        
+        Args:
+            token: Single GitHub token (legacy support)
+            org: GitHub organization name
+            token_manager: Optional GitHubTokenManager instance
+            tokens_by_scope: Optional dictionary mapping scopes to token lists
+            base_url: Base URL for GitHub API
+        """
         self.org = org
-        self.headers = {
-            'Authorization': f'token {token}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        self.base_url = 'https://api.github.com'
+        self.base_url = base_url
+        
+        # Either use provided token manager or create a new one
+        if token_manager:
+            self.token_manager = token_manager
+        elif tokens_by_scope:
+            self.token_manager = GitHubTokenManager(tokens_by_scope, base_url)
+        else:
+            # Legacy mode with single token
+            self.token = token
+            self.token_manager = None
+            self.headers = {
+                'Authorization': f'token {token}',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+            
         logger.info(f"Initialized GitHub client for organization: {org}")
+        
+        # Log token mode
+        if self.token_manager:
+            token_count = sum(len(tokens) for tokens in self.token_manager.tokens_by_scope.values())
+            logger.info(f"Using token manager with {token_count} tokens")
+        else:
+            logger.info("Using single token mode")
         
     def make_request(self, url, method="GET", expect_404=False, data=None):
         """Make API request with rate limit handling"""
         logger.debug(f"Requesting: {url}")
+        
+        # Determine operation type from URL to select appropriate token
+        operation = self._determine_operation_from_url(url)
+        
         while True:
-            response = requests.request(method, url, headers=self.headers, json=data)
+            # Get headers with appropriate token
+            headers = self._get_headers_for_operation(operation)
             
-            # Check rate limits
+            # Make the request
+            response = requests.request(method, url, headers=headers, json=data)
+            
+            # Update rate limit information if using token manager
+            if self.token_manager:
+                # Extract token from Authorization header
+                auth_header = headers.get('Authorization', '')
+                token = auth_header.replace('token ', '') if auth_header.startswith('token ') else None
+                
+                if token:
+                    self.token_manager.update_rate_limit_from_response(token, response)
+            
+            # Check rate limits (using response headers)
             remaining = int(response.headers.get('X-RateLimit-Remaining', 0))
             reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
             
@@ -39,9 +86,17 @@ class GitHubClient:
                 sleep_time = reset_time - current_time + 5  # Add 5 seconds buffer
                 
                 if sleep_time > 0:
-                    logger.info(f"Rate limit exceeded. Waiting for {int(sleep_time/60)} minutes and {int(sleep_time%60)} seconds...")
-                    time.sleep(sleep_time)
-                    continue
+                    # If using token manager, try a different token instead of waiting
+                    if self.token_manager:
+                        logger.warning("Rate limit exceeded. Trying a different token...")
+                        # Force token manager to update and select a different token
+                        self.token_manager._update_rate_limit(headers.get('Authorization', '').replace('token ', ''))
+                        continue
+                    else:
+                        # Single token mode - have to wait
+                        logger.info(f"Rate limit exceeded. Waiting for {int(sleep_time/60)} minutes and {int(sleep_time%60)} seconds...")
+                        time.sleep(sleep_time)
+                        continue
             elif response.status_code == 202:
                 # Sometimes GitHub returns 202 Accepted for content that's being generated
                 logger.info("GitHub is processing the request. Waiting 2 seconds...")
@@ -51,6 +106,73 @@ class GitHubClient:
                 logger.error(f"Error: {response.status_code} for {url}")
                 logger.error(f"Response: {response.text[:200]}...")
                 return response
+    
+    def _determine_operation_from_url(self, url):
+        """
+        Determine the operation type from the URL pattern.
+        
+        Args:
+            url: GitHub API URL
+            
+        Returns:
+            Operation name for token selection
+        """
+        # Extract the path from the URL
+        path = url.replace(self.base_url, '')
+        
+        # Check for organization-level operations
+        if '/orgs/' in path:
+            if '/repos' in path:
+                return "list_repos"
+            elif '/security-advisories' in path:
+                return "org_security"
+            elif '/dependabot/alerts' in path:
+                return "org_dependabot"
+            elif '/secret-scanning/alerts' in path:
+                return "org_secret_scanning"
+            elif '/code-scanning/alerts' in path:
+                return "org_code_scanning"
+            elif '/actions/runners' in path:
+                return "list_runners"
+            else:
+                return "list_organizations"
+        
+        # Check for repository-level operations
+        elif '/repos/' in path:
+            if '/actions/' in path:
+                return "list_workflows"
+            elif '/security-and-analysis' in path or '/vulnerability-alerts' in path:
+                return "repo_security"
+            else:
+                return "list_repos"
+        
+        # Check for user-level operations
+        elif '/user/orgs' in path:
+            return "list_organizations"
+        
+        # Default to repo scope for unknown operations
+        return "list_repos"
+    
+    def _get_headers_for_operation(self, operation):
+        """
+        Get request headers with the appropriate token for an operation.
+        
+        Args:
+            operation: The operation type
+            
+        Returns:
+            Headers dictionary with authorization
+        """
+        if self.token_manager:
+            # Get the best token for this operation
+            token = self.token_manager.get_token_for_operation(operation)
+            return {
+                'Authorization': f'token {token}',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        else:
+            # Legacy mode - use the single token
+            return self.headers
     
     def get_paginated_results(self, url, max_pages=None):
         """Get all paginated results for an endpoint"""
@@ -113,13 +235,29 @@ class GitHubClient:
     
     def get_rate_limit(self):
         """Get current rate limit status"""
-        url = f'{self.base_url}/rate_limit'
-        response = self.make_request(url)
-        if response.status_code == 200:
-            limits = response.json()
-            return limits.get('resources', {}).get('core', {})
-        return None
-        
+        # If using token manager, get all rate limits
+        if self.token_manager:
+            limits = self.token_manager.get_all_rate_limits()
+            # Return the highest remaining limit
+            highest_remaining = 0
+            best_limit = None
+            
+            for token_id, limit_info in limits.items():
+                if limit_info['remaining'] > highest_remaining:
+                    highest_remaining = limit_info['remaining']
+                    best_limit = limit_info
+            
+            return best_limit
+        else:
+            # Legacy mode - check single token
+            url = f'{self.base_url}/rate_limit'
+            response = self.make_request(url)
+            if response.status_code == 200:
+                limits = response.json()
+                return limits.get('resources', {}).get('core', {})
+            return None
+    
+    # All the other methods remain the same
     def get_organization_info(self):
         """Get information about the organization"""
         url = f'{self.base_url}/orgs/{self.org}'
