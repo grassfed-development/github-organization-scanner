@@ -10,10 +10,11 @@ from scanners.base_scanner import BaseScanner
 logger = logging.getLogger(__name__)
 
 class GitHubActionsAnalyzer(BaseScanner):
-    def __init__(self, token, org, storage_client=None):
+    def __init__(self, token, org, storage_client=None, repo_limit=0):
         # Initialize GitHub client
         github_client = GitHubClient(token, org)
         super().__init__(github_client, storage_client)
+        self.repo_limit = repo_limit
         
     def extract_actions_from_workflow(self, content):
         """Extract GitHub Actions used in a workflow file"""
@@ -63,9 +64,15 @@ class GitHubActionsAnalyzer(BaseScanner):
             return base64.b64decode(content).decode('utf-8')
         return None
 
-    def scan(self):
+    def scan(self, repo_limit=0):
         """Analyze GitHub Actions usage across all repositories"""
         repos = self.github_client.get_all_repositories()
+        
+        # Apply repository limit if specified
+        limit = repo_limit or self.repo_limit
+        if limit > 0 and len(repos) > limit:
+            logger.info(f"Limiting scan to {limit} repositories (out of {len(repos)} total)")
+            repos = repos[:limit]
         
         all_actions = []
         repo_actions = {}
@@ -158,13 +165,14 @@ class GitHubActionsAnalyzer(BaseScanner):
             'repository_actions': repo_actions,
             'repository_workflows': repo_workflows,
             'org_actions_config': org_actions_config,
-            'org_runners': org_runners
+            'org_runners': org_runners,
+            'repo_limit_applied': limit if limit > 0 else None
         }
         
     def generate_report(self):
         """Generate a report of GitHub Actions usage"""
         logger.info("Analyzing GitHub Actions usage...")
-        data = self.scan()
+        data = self.scan(self.repo_limit)
         
         # Generate basic report
         logger.info("=" * 50)
@@ -174,6 +182,10 @@ class GitHubActionsAnalyzer(BaseScanner):
         logger.info(f"Repositories with workflows: {data['repositories_with_workflows']}")
         logger.info(f"Total actions used: {data['total_actions_used']}")
         logger.info(f"Unique actions used: {data['unique_actions_used']}")
+        
+        # Repository limit info
+        if data.get('repo_limit_applied'):
+            logger.info(f"Note: Repository limit of {data['repo_limit_applied']} was applied")
         
         # Organization configuration
         org_actions_enabled = data.get('org_actions_config', {}).get('enabled_repositories') != 'none'

@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import argparse
 from datetime import datetime
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
@@ -9,9 +10,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import scanner components
-from utils.github_client import GitHubClient  # Using original name
-from scanners.actions_scanner import GitHubActionsAnalyzer  # Using correct class name
-from scanners.security_scanner import GitHubSecurityAnalyzer  # Using original name
+from utils.github_client import GitHubClient
+from scanners.actions_scanner import GitHubActionsAnalyzer
+from scanners.security_scanner import GitHubSecurityAnalyzer
 from storage.gcs_client import GCSClient
 from utils.logger import setup_logger
 
@@ -26,7 +27,8 @@ DEFAULT_CONFIG = {
     'BASE_URL': os.environ.get('BASE_URL', 'https://api.github.com'),
     'DEBUG': os.environ.get('DEBUG', 'False').lower() in ('true', '1', 't'),
     'PORT': int(os.environ.get('PORT', 8080)),
-    'REPORTS_DIR': os.environ.get('REPORTS_DIR', 'reports')
+    'REPORTS_DIR': os.environ.get('REPORTS_DIR', 'reports'),
+    'REPO_LIMIT': int(os.environ.get('REPO_LIMIT', 0))  # 0 means no limit
 }
 
 # Check if token is available
@@ -68,6 +70,7 @@ def scan_actions():
     token = data.get('token') or DEFAULT_CONFIG['GITHUB_TOKEN']
     org = data.get('org') or DEFAULT_CONFIG['GITHUB_ORG']
     bucket_name = data.get('bucket') or DEFAULT_CONFIG['GCS_BUCKET']
+    repo_limit = data.get('repo_limit', DEFAULT_CONFIG['REPO_LIMIT'])
     
     if not all([token, org]):
         return jsonify({"error": "Missing required parameters"}), 400
@@ -78,12 +81,16 @@ def scan_actions():
         
         # Run scanner
         logger.info(f"Starting Actions scan for {org}...")
-        analyzer = GitHubActionsAnalyzer(token, org, storage_client)
+        if repo_limit > 0:
+            logger.info(f"Repository limit set to {repo_limit}")
+            
+        analyzer = GitHubActionsAnalyzer(token, org, storage_client, repo_limit)
         report = analyzer.generate_report()
         
         return jsonify({
             "status": "success",
             "organization": org,
+            "repo_limit_applied": repo_limit if repo_limit > 0 else None,
             "report_file": report.get("report_file"),
             "summary": {
                 "total_repositories": report.get("total_repositories"),
@@ -105,6 +112,7 @@ def scan_security():
     token = data.get('token') or DEFAULT_CONFIG['GITHUB_TOKEN']
     org = data.get('org') or DEFAULT_CONFIG['GITHUB_ORG']
     bucket_name = data.get('bucket') or DEFAULT_CONFIG['GCS_BUCKET']
+    repo_limit = data.get('repo_limit', DEFAULT_CONFIG['REPO_LIMIT'])
     
     if not all([token, org]):
         return jsonify({"error": "Missing required parameters"}), 400
@@ -115,12 +123,16 @@ def scan_security():
         
         # Run scanner
         logger.info(f"Starting Security scan for {org}...")
-        analyzer = GitHubSecurityAnalyzer(token, org, storage_client)
+        if repo_limit > 0:
+            logger.info(f"Repository limit set to {repo_limit}")
+            
+        analyzer = GitHubSecurityAnalyzer(token, org, storage_client, repo_limit)
         report = analyzer.generate_report()
         
         return jsonify({
             "status": "success",
             "organization": org,
+            "repo_limit_applied": repo_limit if repo_limit > 0 else None,
             "report_file": report.get("report_file"),
             "summary": {
                 "total_repositories": report.get("total_repositories"),
@@ -187,6 +199,7 @@ def scan_all_orgs():
     token = data.get('token') or DEFAULT_CONFIG['GITHUB_TOKEN']
     bucket_name = data.get('bucket') or DEFAULT_CONFIG['GCS_BUCKET']
     scan_type = data.get('scan_type', 'security')  # 'security' or 'actions' or 'all'
+    repo_limit = data.get('repo_limit', DEFAULT_CONFIG['REPO_LIMIT'])
     
     if not token:
         return jsonify({"error": "Missing required parameters"}), 400
@@ -215,6 +228,7 @@ def scan_all_orgs():
             "status": "success",
             "scan_started_at": datetime.now().isoformat(),
             "scan_type": scan_type,
+            "repo_limit_applied": repo_limit if repo_limit > 0 else None,
             "organizations_count": len(organizations),
             "organizations": []
         }
@@ -232,7 +246,7 @@ def scan_all_orgs():
             # Run security scan if requested
             if scan_type in ['security', 'all']:
                 try:
-                    security_analyzer = GitHubSecurityAnalyzer(token, org_name, storage_client)
+                    security_analyzer = GitHubSecurityAnalyzer(token, org_name, storage_client, repo_limit)
                     security_report = security_analyzer.generate_report()
                     org_result["scans"]["security"] = {
                         "status": "success",
@@ -258,7 +272,7 @@ def scan_all_orgs():
             # Run actions scan if requested
             if scan_type in ['actions', 'all']:
                 try:
-                    actions_analyzer = GitHubActionsAnalyzer(token, org_name, storage_client)
+                    actions_analyzer = GitHubActionsAnalyzer(token, org_name, storage_client, repo_limit)
                     actions_report = actions_analyzer.generate_report()
                     org_result["scans"]["actions"] = {
                         "status": "success",
@@ -310,6 +324,10 @@ def run_local():
         return
     
     storage_client = GCSClient(DEFAULT_CONFIG['GCS_BUCKET']) if DEFAULT_CONFIG['GCS_BUCKET'] else None
+    repo_limit = DEFAULT_CONFIG['REPO_LIMIT']
+    
+    if repo_limit > 0:
+        logger.info(f"Repository limit set to {repo_limit}")
     
     # Create a GitHub client without specifying an org
     client = GitHubClient(token=DEFAULT_CONFIG['GITHUB_TOKEN'], org="")
@@ -345,18 +363,30 @@ def run_local():
         
         # Run Actions scanner
         logger.info(f"Running GitHub Actions scan for {org_name}...")
-        actions_analyzer = GitHubActionsAnalyzer(DEFAULT_CONFIG['GITHUB_TOKEN'], org_name, storage_client)
+        actions_analyzer = GitHubActionsAnalyzer(DEFAULT_CONFIG['GITHUB_TOKEN'], org_name, storage_client, repo_limit)
         actions_analyzer.generate_report()
         
         # Run Security scanner
         logger.info(f"Running GitHub Security scan for {org_name}...")
-        security_analyzer = GitHubSecurityAnalyzer(DEFAULT_CONFIG['GITHUB_TOKEN'], org_name, storage_client)
+        security_analyzer = GitHubSecurityAnalyzer(DEFAULT_CONFIG['GITHUB_TOKEN'], org_name, storage_client, repo_limit)
         security_analyzer.generate_report()
 
 if __name__ == '__main__':
     import sys
     
-    if len(sys.argv) > 1 and sys.argv[1] == 'local':
+    parser = argparse.ArgumentParser(description="GitHub Organization Scanner")
+    parser.add_argument('mode', nargs='?', default='server', choices=['local', 'server'], 
+                      help="Run mode: 'local' for local scanning, 'server' for web server")
+    parser.add_argument('--limit', type=int, default=DEFAULT_CONFIG['REPO_LIMIT'],
+                      help="Limit the number of repositories to scan")
+    
+    args = parser.parse_args()
+    
+    # Override repo limit if specified on command line
+    if args.limit > 0:
+        DEFAULT_CONFIG['REPO_LIMIT'] = args.limit
+        
+    if args.mode == 'local' or (len(sys.argv) > 1 and sys.argv[1] == 'local'):
         # Run scanners locally
         run_local()
     else:

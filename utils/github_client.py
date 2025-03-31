@@ -128,7 +128,6 @@ class GitHubClient:
             return response.json()
         return None
         
-    # New method for organization-level Actions configuration
     def get_org_actions_config(self):
         """Get organization-level GitHub Actions configuration"""
         url = f'{self.base_url}/orgs/{self.org}/actions'
@@ -138,7 +137,33 @@ class GitHubClient:
             return response.json()
         return {}
         
-    # New methods for organization-level scanning
+    def get_org_security_features(self):
+        """Get organization-level security features"""
+        url = f'{self.base_url}/orgs/{self.org}/security-and-analysis'
+        response = self.make_request(url, expect_404=True)
+        
+        if response.status_code == 200:
+            return response.json()
+        return {}
+        
+    def get_repository_security_features(self, repo_name):
+        """Get security features for a specific repository"""
+        url = f'{self.base_url}/repos/{self.org}/{repo_name}/security-and-analysis'
+        response = self.make_request(url, expect_404=True)
+        
+        if response.status_code == 200:
+            return response.json()
+        return {}
+        
+    def get_repository_contents(self, repo_name, path):
+        """Get contents of a file or directory in a repository"""
+        url = f'{self.base_url}/repos/{self.org}/{repo_name}/contents/{path}'
+        response = self.make_request(url, expect_404=True)
+        
+        if response.status_code == 200:
+            return response.json()
+        return {}
+        
     def get_org_dependabot_alerts(self):
         """Get all Dependabot alerts for the organization"""
         url = f'{self.base_url}/orgs/{self.org}/dependabot/alerts?state=open&per_page=100'

@@ -1,7 +1,6 @@
 import logging
 from collections import Counter
 from datetime import datetime
-from typing import Dict, Any, List, Optional
 
 from utils.github_client import GitHubClient
 from scanners.base_scanner import BaseScanner
@@ -9,25 +8,90 @@ from scanners.base_scanner import BaseScanner
 logger = logging.getLogger(__name__)
 
 class GitHubSecurityAnalyzer(BaseScanner):
-    """
-    Improved security scanner that uses organization-level endpoints
-    instead of making individual repository API calls when possible.
-    """
-    
-    def __init__(self, token: str, org: str, storage_client=None):
+    def __init__(self, token, org, storage_client=None, repo_limit=0):
         # Initialize GitHub client
         github_client = GitHubClient(token, org)
         super().__init__(github_client, storage_client)
+        self.repo_limit = repo_limit
     
-    def scan(self) -> Dict[str, Any]:
-        """Analyze security status across all repositories using org-level APIs where possible"""
-        # Get all repositories
-        logger.info(f"Fetching repositories for {self.org}...")
+    def get_org_security_advisories(self):
+        """Get security advisories at the organization level"""
+        url = f'{self.github_client.base_url}/orgs/{self.org}/security-advisories'
+        response = self.github_client.make_request(url, expect_404=True)
+        
+        if response.status_code != 200:
+            logger.warning(f"Unable to fetch organization-level security advisories for {self.org}")
+            return []
+            
+        return response.json()
+        
+    def get_org_dependabot_alerts(self):
+        """Get all Dependabot alerts for the organization"""
+        url = f'{self.github_client.base_url}/orgs/{self.org}/dependabot/alerts?state=open&per_page=100'
+        return self.github_client.get_paginated_results(url)
+        
+    def get_org_secret_scanning_alerts(self):
+        """Get all secret scanning alerts for the organization"""
+        url = f'{self.github_client.base_url}/orgs/{self.org}/secret-scanning/alerts?state=open&per_page=100'
+        return self.github_client.get_paginated_results(url)
+    
+    def get_org_code_scanning_alerts(self):
+        """Get all code scanning alerts for the organization"""
+        url = f'{self.github_client.base_url}/orgs/{self.org}/code-scanning/alerts?state=open&per_page=100'
+        return self.github_client.get_paginated_results(url)
+    
+    def check_security_features(self, repo_name):
+        """Check security features enabled for a repository"""
+        url = f'{self.github_client.base_url}/repos/{self.org}/{repo_name}/security-and-analysis'
+        response = self.github_client.make_request(url, expect_404=True)
+        
+        if response.status_code != 200:
+            return {
+                "advanced_security": {"status": "disabled"},
+                "secret_scanning": {"status": "disabled"},
+                "secret_scanning_push_protection": {"status": "disabled"}
+            }
+            
+        return response.json()
+
+    def check_vulnerability_alerts(self, repo_name):
+        """Check if vulnerability alerts are enabled"""
+        url = f'{self.github_client.base_url}/repos/{self.org}/{repo_name}/vulnerability-alerts'
+        response = self.github_client.make_request(url, expect_404=True)
+        
+        # 204 means enabled, 404 means disabled
+        return response.status_code == 204
+
+    def check_automated_security_fixes(self, repo_name):
+        """Check if automated security fixes are enabled"""
+        url = f'{self.github_client.base_url}/repos/{self.org}/{repo_name}/automated-security-fixes'
+        response = self.github_client.make_request(url, expect_404=True)
+        
+        if response.status_code != 200:
+            # Check for dependabot.yml file as an alternative way to detect automated fixes
+            contents = self.github_client.get_repository_contents(repo_name, '.github')
+            if isinstance(contents, list):
+                for item in contents:
+                    if item.get('name') == 'dependabot.yml' or item.get('name') == 'dependabot.yaml':
+                        return True
+            return False
+            
+        return response.json().get('enabled', False)
+
+    def scan(self, repo_limit=0):
+        """Analyze security status across all repositories"""
         repos = self.github_client.get_all_repositories()
         
-        # Check rate limits before starting major operations
+        # Apply repository limit if specified
+        limit = repo_limit or self.repo_limit
+        if limit > 0 and len(repos) > limit:
+            logger.info(f"Limiting scan to {limit} repositories (out of {len(repos)} total)")
+            repos = repos[:limit]
+        
+        # Check rate limits before starting
         rate_limit = self.github_client.get_rate_limit()
-        logger.info(f"API calls remaining: {rate_limit.get('remaining', 0)}")
+        if rate_limit:
+            logger.info(f"API calls remaining: {rate_limit.get('remaining', 0)}")
         
         # Initialize data structures
         security_data = {
@@ -48,33 +112,37 @@ class GitHubSecurityAnalyzer(BaseScanner):
                 'total_code_scanning_alerts': 0,
                 'total_dependabot_alerts': 0
             },
-            'repositories': []
+            'repositories': [],
+            'repo_limit_applied': limit if limit > 0 else None
         }
         
-        # Step 1: Fetch all organization-level alerts
-        # This is more efficient than making individual repo API calls
+        # Get organization-level alerts first (more efficient)
         logger.info(f"Fetching organization-level alerts for {self.org}...")
         
-        # Get organization-level security features
-        org_security_features = self.github_client.get_org_security_features()
-        logger.info(f"Retrieved organization-level security features")
-        
-        # Get all dependabot alerts at organization level
-        logger.info(f"Fetching organization-level Dependabot alerts...")
-        dependabot_alerts = self.github_client.get_org_dependabot_alerts()
-        logger.info(f"Retrieved {len(dependabot_alerts)} organization-level Dependabot alerts")
+# Get all dependabot alerts at organization level
+        try:
+            dependabot_alerts = self.github_client.get_org_dependabot_alerts()
+            logger.info(f"Retrieved {len(dependabot_alerts)} organization-level Dependabot alerts")
+        except Exception as e:
+            logger.warning(f"Error fetching organization-level Dependabot alerts: {e}")
+            dependabot_alerts = []
         
         # Get all secret scanning alerts at organization level
-        logger.info(f"Fetching organization-level Secret Scanning alerts...")
-        secret_alerts = self.github_client.get_org_secret_scanning_alerts()
-        logger.info(f"Retrieved {len(secret_alerts)} organization-level Secret Scanning alerts")
+        try:
+            secret_alerts = self.github_client.get_org_secret_scanning_alerts()
+            logger.info(f"Retrieved {len(secret_alerts)} organization-level Secret Scanning alerts")
+        except Exception as e:
+            logger.warning(f"Error fetching organization-level Secret Scanning alerts: {e}")
+            secret_alerts = []
         
         # Get all code scanning alerts at organization level
-        logger.info(f"Fetching organization-level Code Scanning alerts...")
-        code_alerts = self.github_client.get_org_code_scanning_alerts()
-        logger.info(f"Retrieved {len(code_alerts)} organization-level Code Scanning alerts")
+        try:
+            code_alerts = self.github_client.get_org_code_scanning_alerts()
+            logger.info(f"Retrieved {len(code_alerts)} organization-level Code Scanning alerts")
+        except Exception as e:
+            logger.warning(f"Error fetching organization-level Code Scanning alerts: {e}")
+            code_alerts = []
         
-        # Step 2: Process alerts and create repository mappings
         # Create dictionaries for quick lookups by repository
         repo_to_dependabot_alerts = {}
         repo_to_secret_alerts = {}
@@ -132,9 +200,7 @@ class GitHubSecurityAnalyzer(BaseScanner):
             dependabot_packages[package] += 1
             dependabot_severities[severity] += 1
         
-        # Step 3: Process repositories
-        # Since we can't get all security features at the org level,
-        # we still need to make some per-repository API calls
+        # Now process repositories for security features
         for repo in repos:
             repo_name = repo['name']
             logger.info(f"Processing repository {repo_name}... ({repos.index(repo) + 1}/{len(repos)})")
@@ -151,9 +217,7 @@ class GitHubSecurityAnalyzer(BaseScanner):
                 }
             }
             
-            # Check individual repository security features
-            # We still need to do this per repo, as organization-level endpoint doesn't
-            # give us the full picture for each repository
+            # Check security features
             security_features = self.github_client.get_repository_security_features(repo_name)
             
             # Add feature status to repo data
@@ -161,8 +225,8 @@ class GitHubSecurityAnalyzer(BaseScanner):
                 'advanced_security': security_features.get('advanced_security', {}).get('status') == 'enabled',
                 'secret_scanning': security_features.get('secret_scanning', {}).get('status') == 'enabled',
                 'secret_scanning_push_protection': security_features.get('secret_scanning_push_protection', {}).get('status') == 'enabled',
-                'vulnerability_alerts': bool(repo_to_dependabot_alerts.get(repo_name)),  # Infer from alerts presence
-                'automated_security_fixes': 'dependabot.yml' in self.github_client.get_repository_contents(repo_name, '.github')  # Check for dependabot config
+                'vulnerability_alerts': self.check_vulnerability_alerts(repo_name),
+                'automated_security_fixes': self.check_automated_security_fixes(repo_name)
             }
             
             # Update org-wide counters
@@ -209,15 +273,19 @@ class GitHubSecurityAnalyzer(BaseScanner):
         
         return security_data
         
-    def generate_report(self) -> Dict[str, Any]:
+    def generate_report(self):
         """Generate a report of GitHub security status"""
         logger.info("Analyzing GitHub security status...")
-        data = self.scan()
+        data = self.scan(self.repo_limit)
         
         # Generate basic report
         logger.info("=" * 50)
         logger.info(f"GitHub Security Status Report for {self.org}")
         logger.info("=" * 50)
+        
+        # Repository limit info
+        if data.get('repo_limit_applied'):
+            logger.info(f"Note: Repository limit of {data['repo_limit_applied']} was applied")
         
         logger.info("\nSecurity Features:")
         logger.info(f"  Total repositories: {data['total_repositories']}")
