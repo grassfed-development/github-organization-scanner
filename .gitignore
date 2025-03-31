@@ -1,3 +1,20 @@
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Reports directory (optional, if you don't want to commit generated reports)
+reports/
+
+# Logs directory (optional, if you don't want to commit log files)
+logs/
+
+# Environment variables
 .env
-/logs/*
-/reports/*
