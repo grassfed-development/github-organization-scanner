@@ -1,10 +1,10 @@
 # GitHub Organization Scanner
 
-A comprehensive scanning service for GitHub Organizations to monitor security settings, vulnerabilities, and GitHub Actions usage.
+A comprehensive Python-based scanning service for GitHub Organizations to monitor security settings, vulnerabilities, and GitHub Actions usage with Google Cloud Platform integration.
 
 ## Features
 
-- Scans multiple GitHub organizations
+- Efficiently scans multiple GitHub organizations
 - Analyzes security features across repositories:
   - Advanced Security
   - Secret Scanning
@@ -16,25 +16,34 @@ A comprehensive scanning service for GitHub Organizations to monitor security se
   - Code Scanning Alerts
   - Dependabot Alerts
 - Analyzes GitHub Actions usage across repositories
-- Supports local execution and Cloud Run deployment
+- Supports local execution and Google Cloud Run deployment
 - Stores reports locally and in Google Cloud Storage
-- Advanced token management with permission-based scopes
-- Rate limit optimization through token rotation
+- API-based architecture with Flask web service
+- Rate limit optimization through intelligent waiting
+- Repository limit option for faster testing and debugging
+
+## Architecture
+
+- **Python-based**: Built with Python 3.11+
+- **Google Cloud Storage**: Optional cloud storage for reports
+- **Flask Web Service**: RESTful API for remote scanning
+- **Organization-Level APIs**: Prioritizes GitHub's organization-level endpoints for efficient scanning
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.11+
-- GitHub Personal Access Tokens with appropriate scopes (see Token Management section)
-- Google Cloud Storage bucket (for cloud storage support)
+- GitHub Personal Access Token with appropriate scopes
+- Google Cloud SDK (for GCP deployment)
+- Google Cloud Storage bucket (optional)
 
 ### Local Setup
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/your-username/github-security-scanner.git
-cd github-security-scanner
+git clone https://github.com/your-username/github-organization-scanner.git
+cd github-organization-scanner
 ```
 
 2. Create a virtual environment:
@@ -50,128 +59,79 @@ pip install -r requirements.txt
 
 4. Create a `.env` file with your configuration:
 ```bash
-# Copy the example file
 cp .env.example .env
-
-# Edit with your settings
-nano .env
 ```
 
-## Token Management
-
-The application uses a sophisticated token management system that allows you to use multiple GitHub tokens with different permission scopes. This approach follows the principle of least privilege while avoiding rate limiting issues when scanning large organizations.
-
-### Permission Scopes
-
-For optimal security, create tokens with only the required permissions for each operation:
-
-| Operation | Required Scope | Description |
-|-----------|---------------|-------------|
-| Listing Organizations | `read:org` | Read-only access to list organizations |
-| Listing Repositories | `repo:status` or `public_repo` | Minimal repository access |
-| Scanning Actions | `workflow` | Access to GitHub Actions workflows |
-| Security Scanning | `security_events` | Access to security vulnerabilities |
-| Full Repository Access | `repo` | Full access to private repositories (use sparingly) |
-| Organization Admin | `admin:org` | Admin access to organizations (use sparingly) |
-| Runner Management | `manage_runners:org` | Access to organization runners |
-
-### Configuring Tokens in `.env`
-
-Configure your tokens by permission scope in the `.env` file:
-
-```bash
-# Single token (for backward compatibility)
-GITHUB_TOKEN=ghp_your_legacy_token
-
-# Repository access tokens
-GITHUB_TOKENS_REPO=ghp_repo_token1,ghp_repo_token2
-GITHUB_TOKENS_REPO_STATUS=ghp_status_token1,ghp_status_token2
-GITHUB_TOKENS_PUBLIC_REPO=ghp_public_token1,ghp_public_token2
-
-# Organization access tokens
-GITHUB_TOKENS_READ_ORG=ghp_read_org_token1,ghp_read_org_token2,ghp_read_org_token3
-GITHUB_TOKENS_ADMIN_ORG=ghp_admin_token1
-
-# Security and workflow tokens
-GITHUB_TOKENS_SECURITY_EVENTS=ghp_security_token1,ghp_security_token2
-GITHUB_TOKENS_WORKFLOW=ghp_workflow_token1,ghp_workflow_token2
-
-# Other configuration
-GITHUB_ORG=optional_specific_org
-BUCKET_NAME=your-bucket-name
-LOG_LEVEL=INFO
+5. Edit the `.env` file with your settings, including your GitHub token:
+```
+GITHUB_TOKEN=ghp_your_token_here
 ```
 
-### Best Practices for Token Management
+## Token Permissions
 
-1. **Create multiple tokens per scope**: For high-volume operations like repository listing, create 3-5 tokens with the same minimal scope to increase your effective rate limit.
-
-2. **Use separate user accounts**: For optimal isolation, create tokens from different GitHub user accounts (all with access to your organization).
-
-3. **Token rotation**: Create a process to rotate these tokens every 30-90 days.
-
-4. **Add descriptive comments**: When creating tokens in GitHub, add comments like "GitHub Scanner - read:org only" to track their purpose.
-
-5. **Prioritize least privilege**: Use more specific permission scopes whenever possible instead of broader ones.
-
-### How Token Management Works
-
-1. **Permission-Based Selection**: The system automatically selects tokens with the appropriate permissions for each operation.
-
-2. **Rate Limit Awareness**: Tokens with the highest remaining rate limits are prioritized.
-
-3. **Automatic Rotation**: As tokens approach their rate limits, the system rotates to others with the same permissions.
-
-4. **Graceful Waiting**: If all tokens for a particular operation are rate-limited, the system will wait for the earliest reset time.
+For optimal functionality, your GitHub token should have these scopes:
+- `repo` - For repository access
+- `read:org` - For listing organizations
+- `security_events` - For security scanning
+- `workflow` - For Actions scanning
 
 ## Usage
 
 ### Running Locally
 
-To run scans locally for all organizations you have access to:
+Run a scan directly without using the web server:
 
 ```bash
+# Scan all repositories in all accessible organizations
 python app.py local
+
+# Scan with a repository limit (useful for testing)
+python app.py local --limit 50
+
+# Alternatively, set REPO_LIMIT in .env file
 ```
 
-To run the Flask web server locally:
+### Web Server Mode
+
+Run the scanner as a web service:
 
 ```bash
+# Start the web server 
 python app.py
 ```
 
-### API Endpoints
+Then use the API endpoints:
 
-- `GET /health` - Health check endpoint
-- `GET /organizations` - List accessible GitHub organizations
-- `POST /scan/all` - Scan all accessible organizations
-- `POST /scan/actions` - Scan a specific organization for GitHub Actions
-- `POST /scan/security` - Scan a specific organization for security settings
+1. List organizations:
+   ```bash
+   curl http://localhost:8080/organizations
+   ```
 
-#### Example Requests
+2. Run a security scan:
+   ```bash
+   curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"org": "your-org-name", "repo_limit": 50}' \
+     http://localhost:8080/scan/security
+   ```
 
-List organizations:
-```bash
-curl -H "Authorization: Bearer YOUR_GITHUB_TOKEN" http://localhost:8080/organizations
-```
+3. Run an Actions scan:
+   ```bash
+   curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"org": "your-org-name"}' \
+     http://localhost:8080/scan/actions
+   ```
 
-Scan all organizations:
-```bash
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"token": "YOUR_GITHUB_TOKEN", "scan_type": "all"}' \
-  http://localhost:8080/scan/all
-```
+4. Scan all organizations:
+   ```bash
+   curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"scan_type": "all"}' \
+     http://localhost:8080/scan/all
+   ```
 
-Scan a single organization:
-```bash
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"token": "YOUR_GITHUB_TOKEN", "org": "your-org-name"}' \
-  http://localhost:8080/scan/security
-```
-
-## Deployment
+## Google Cloud Platform Deployment
 
 ### Google Cloud Run
 
@@ -191,19 +151,41 @@ gcloud run deploy github-security-scanner \
 
 3. Set up Secret Manager for GitHub tokens:
 ```bash
-# For the legacy single token
 gcloud secrets create github-token --replication-policy automatic
 echo -n "YOUR_GITHUB_TOKEN" | gcloud secrets versions add github-token --data-file=-
-
-# For scoped tokens (example for read:org tokens)
-gcloud secrets create github-tokens-read-org --replication-policy automatic
-echo -n "ghp_token1,ghp_token2,ghp_token3" | gcloud secrets versions add github-tokens-read-org --data-file=-
 ```
 
 4. Update the Cloud Run service to use the secrets:
 ```bash
 gcloud run services update github-security-scanner \
-  --set-secrets=GITHUB_TOKEN=github-token:latest,GITHUB_TOKENS_READ_ORG=github-tokens-read-org:latest
+  --set-secrets=GITHUB_TOKEN=github-token:latest
+```
+
+### Cloud Scheduler Integration
+
+Automate regular scanning with Cloud Scheduler:
+
+1. Create a service account:
+```bash
+gcloud iam service-accounts create github-scanner-invoker
+```
+
+2. Grant permission to invoke the Cloud Run service:
+```bash
+gcloud run services add-iam-policy-binding github-security-scanner \
+  --member=serviceAccount:github-scanner-invoker@your-project.iam.gserviceaccount.com \
+  --role=roles/run.invoker
+```
+
+3. Create a scheduler job:
+```bash
+gcloud scheduler jobs create http github-scanner-weekly \
+  --schedule="0 0 * * 0" \
+  --uri="https://github-security-scanner-url/scan/all" \
+  --http-method=POST \
+  --headers="Content-Type=application/json" \
+  --body='{"scan_type":"all"}' \
+  --oidc-service-account-email=github-scanner-invoker@your-project.iam.gserviceaccount.com
 ```
 
 ## Reports
@@ -216,6 +198,10 @@ JSON reports are saved:
 - Locally: In the `reports/` directory
 - Cloud: In the GCS bucket (if configured) under `github_scanner/{scan_type}/{filename}`
 
+## Future Development
+
+This repository is specifically designed to work with Google Cloud Platform storage. A future repository will be developed for Azure Storage and Azure Functions integration.
+
 ## Troubleshooting
 
 ### Rate Limiting Issues
@@ -223,15 +209,14 @@ JSON reports are saved:
 If you encounter rate limiting issues:
 
 1. Check the logs for warnings about rate limits
-2. Verify your tokens have the correct scopes
-3. Add more tokens to high-usage categories (particularly `repo` and `read:org`)
-4. For very large organizations (1000+ repositories), you may need 5-10 tokens per category
+2. The scanner will automatically wait for the rate limit to reset
+3. For large organizations, consider using the `REPO_LIMIT` setting during testing
 
 ### Permission Issues
 
 If you encounter permission errors:
 
-1. Ensure your tokens have the necessary scopes for the operations
+1. Ensure your token has the necessary scopes (repo, read:org, security_events, workflow)
 2. Verify the token owner has appropriate access to the organization
 3. For organization-level operations, ensure the "Grant organization access" checkbox was selected when creating the token
 
