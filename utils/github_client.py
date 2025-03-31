@@ -127,3 +127,38 @@ class GitHubClient:
         if response.status_code == 200:
             return response.json()
         return None
+        
+    # New method for organization-level Actions configuration
+    def get_org_actions_config(self):
+        """Get organization-level GitHub Actions configuration"""
+        url = f'{self.base_url}/orgs/{self.org}/actions'
+        response = self.make_request(url, expect_404=True)
+        
+        if response.status_code == 200:
+            return response.json()
+        return {}
+        
+    # New methods for organization-level scanning
+    def get_org_dependabot_alerts(self):
+        """Get all Dependabot alerts for the organization"""
+        url = f'{self.base_url}/orgs/{self.org}/dependabot/alerts?state=open&per_page=100'
+        return self.get_paginated_results(url)
+        
+    def get_org_secret_scanning_alerts(self):
+        """Get all secret scanning alerts for the organization"""
+        url = f'{self.base_url}/orgs/{self.org}/secret-scanning/alerts?state=open&per_page=100'
+        return self.get_paginated_results(url)
+    
+    def get_org_code_scanning_alerts(self):
+        """Get all code scanning alerts for the organization"""
+        url = f'{self.base_url}/orgs/{self.org}/code-scanning/alerts?state=open&per_page=100'
+        return self.get_paginated_results(url)
+    
+    def get_org_runners(self):
+        """Get all GitHub Actions runners for the organization"""
+        url = f'{self.base_url}/orgs/{self.org}/actions/runners'
+        response = self.make_request(url)
+        
+        if response.status_code == 200:
+            return response.json().get('runners', [])
+        return []

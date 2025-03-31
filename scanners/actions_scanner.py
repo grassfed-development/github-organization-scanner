@@ -69,6 +69,26 @@ class GitHubActionsAnalyzer(BaseScanner):
         
         all_actions = []
         repo_actions = {}
+        repo_workflows = {}
+        
+        # Try to get organization-level data
+        try:
+            # Get organization-level Actions configuration
+            logger.info(f"Fetching organization-level Actions configuration...")
+            org_actions_config = self.github_client.get_org_actions_config()
+            logger.info(f"Retrieved organization-level Actions configuration")
+        except Exception as e:
+            logger.warning(f"Error fetching organization Actions config: {e}")
+            org_actions_config = {}
+            
+        try:
+            # Get organization-level runners
+            logger.info(f"Fetching organization-level runners...")
+            org_runners = self.github_client.get_org_runners()
+            logger.info(f"Retrieved {len(org_runners)} organization-level runners")
+        except Exception as e:
+            logger.warning(f"Error fetching organization runners: {e}")
+            org_runners = []
         
         # Check rate limits before starting
         rate_limit = self.github_client.get_rate_limit()
@@ -86,6 +106,7 @@ class GitHubActionsAnalyzer(BaseScanner):
                 continue
                 
             actions_in_repo = []
+            workflows_in_repo = []
             
             for workflow in workflow_files:
                 # Skip directories or non-YAML files
@@ -94,14 +115,26 @@ class GitHubActionsAnalyzer(BaseScanner):
                     
                 content = self.get_file_content(repo_name, workflow['path'])
                 if content:
+                    workflow_data = {
+                        'name': workflow['name'],
+                        'path': workflow['path'],
+                        'content_size': len(content) if content else 0
+                    }
+                    
                     actions = self.extract_actions_from_workflow(content)
-                    actions_in_repo.extend(actions)
-                    all_actions.extend(actions)
+                    if actions:
+                        workflow_data['actions_count'] = len(actions)
+                        workflow_data['actions'] = actions
+                        actions_in_repo.extend(actions)
+                        all_actions.extend(actions)
+                        
+                    workflows_in_repo.append(workflow_data)
             
             if actions_in_repo:
                 repo_actions[repo_name] = actions_in_repo
-                logger.info(f"Found {len(actions_in_repo)} actions in {repo_name}")
-            
+                repo_workflows[repo_name] = workflows_in_repo
+                logger.info(f"Found {len(actions_in_repo)} actions in {len(workflows_in_repo)} workflows in {repo_name}")
+        
         # Count action usage
         action_counts = Counter(all_actions)
         
@@ -122,7 +155,10 @@ class GitHubActionsAnalyzer(BaseScanner):
             'publisher_counts': dict(Counter(publishers)),
             'total_actions_used': len(all_actions),
             'unique_actions_used': len(action_counts),
-            'repository_actions': repo_actions
+            'repository_actions': repo_actions,
+            'repository_workflows': repo_workflows,
+            'org_actions_config': org_actions_config,
+            'org_runners': org_runners
         }
         
     def generate_report(self):
@@ -138,6 +174,14 @@ class GitHubActionsAnalyzer(BaseScanner):
         logger.info(f"Repositories with workflows: {data['repositories_with_workflows']}")
         logger.info(f"Total actions used: {data['total_actions_used']}")
         logger.info(f"Unique actions used: {data['unique_actions_used']}")
+        
+        # Organization configuration
+        org_actions_enabled = data.get('org_actions_config', {}).get('enabled_repositories') != 'none'
+        logger.info(f"Organization Actions enabled: {org_actions_enabled}")
+        
+        # Organization runners
+        org_runners = data.get('org_runners', [])
+        logger.info(f"Organization runners: {len(org_runners)}")
         
         logger.info("\nTop 20 most used actions:")
         for action, count in Counter(data['action_counts']).most_common(20):
