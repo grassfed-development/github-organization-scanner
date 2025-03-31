@@ -94,6 +94,8 @@ class GitHubActionsAnalyzer(BaseScanner):
         all_actions = []
         repo_actions = {}
         repo_workflows = {}
+        archived_repos_count = 0  # Track archived repositories
+        repos_with_workflows_archived = 0  # Track archived repos with workflows
         
         # Try to get organization-level data
         try:
@@ -119,8 +121,28 @@ class GitHubActionsAnalyzer(BaseScanner):
         if rate_limit:
             logger.info(f"API calls remaining: {rate_limit.get('remaining', 0)}")
         
+        # Repository metadata with archive status
+        repo_metadata = {}
+        
         for repo in repos:
             repo_name = repo['name']
+            is_archived = repo.get('archived', False)
+            
+            # Track archived repositories
+            if is_archived:
+                archived_repos_count += 1
+                
+            # Store repository metadata
+            repo_metadata[repo_name] = {
+                'name': repo_name,
+                'url': repo.get('html_url', ''),
+                'private': repo.get('private', False),
+                'archived': is_archived,
+                'created_at': repo.get('created_at', ''),
+                'updated_at': repo.get('updated_at', ''),
+                'pushed_at': repo.get('pushed_at', '')
+            }
+            
             logger.info(f"Analyzing workflows for {repo_name}... ({repos.index(repo) + 1}/{len(repos)})")
             
             workflow_files = self.get_workflow_files(repo_name)
@@ -158,6 +180,10 @@ class GitHubActionsAnalyzer(BaseScanner):
                 repo_actions[repo_name] = actions_in_repo
                 repo_workflows[repo_name] = workflows_in_repo
                 logger.info(f"Found {len(actions_in_repo)} actions in {len(workflows_in_repo)} workflows in {repo_name}")
+                
+                # Track archived repos with workflows
+                if is_archived:
+                    repos_with_workflows_archived += 1
         
         # Count action usage
         action_counts = Counter(all_actions)
@@ -171,16 +197,25 @@ class GitHubActionsAnalyzer(BaseScanner):
                     publishers[publisher] = 0
                 publishers[publisher] += action_counts[action]
         
+        # Calculate active repositories (total minus archived)
+        active_repos_count = len(repos) - archived_repos_count
+        active_repos_with_workflows = len(repo_actions) - repos_with_workflows_archived
+        
         return {
             'org': self.org,
             'total_repositories': len(repos),
+            'archived_repositories': archived_repos_count,
+            'active_repositories': active_repos_count,
             'repositories_with_workflows': len(repo_actions),
+            'active_repositories_with_workflows': active_repos_with_workflows,
+            'archived_repositories_with_workflows': repos_with_workflows_archived,
             'action_counts': dict(action_counts),
             'publisher_counts': dict(Counter(publishers)),
             'total_actions_used': len(all_actions),
             'unique_actions_used': len(action_counts),
             'repository_actions': repo_actions,
             'repository_workflows': repo_workflows,
+            'repository_metadata': repo_metadata,
             'org_actions_config': org_actions_config,
             'org_runners': org_runners,
             'repo_limit_applied': limit if limit > 0 else None
@@ -196,7 +231,11 @@ class GitHubActionsAnalyzer(BaseScanner):
         logger.info(f"GitHub Actions Usage Report for {self.org}")
         logger.info("=" * 50)
         logger.info(f"Total repositories: {data['total_repositories']}")
-        logger.info(f"Repositories with workflows: {data['repositories_with_workflows']}")
+        logger.info(f"Archived repositories: {data['archived_repositories']} ({(data['archived_repositories'] / data['total_repositories'] * 100):.1f}%)")
+        logger.info(f"Active repositories: {data['active_repositories']} ({(data['active_repositories'] / data['total_repositories'] * 100):.1f}%)")
+        logger.info(f"Repositories with workflows: {data['repositories_with_workflows']} ({(data['repositories_with_workflows'] / data['total_repositories'] * 100):.1f}%)")
+        logger.info(f"Active repositories with workflows: {data['active_repositories_with_workflows']} ({(data['active_repositories_with_workflows'] / data['active_repositories'] * 100 if data['active_repositories'] > 0 else 0):.1f}%)")
+        logger.info(f"Archived repositories with workflows: {data['archived_repositories_with_workflows']} ({(data['archived_repositories_with_workflows'] / data['archived_repositories'] * 100 if data['archived_repositories'] > 0 else 0):.1f}%)")
         logger.info(f"Total actions used: {data['total_actions_used']}")
         logger.info(f"Unique actions used: {data['unique_actions_used']}")
         

@@ -118,6 +118,7 @@ def scan_actions():
             "report_file": report.get("report_file"),
             "summary": {
                 "total_repositories": report.get("total_repositories"),
+                "archived_repositories": report.get("archived_repositories", 0),
                 "repositories_with_workflows": report.get("repositories_with_workflows"),
                 "total_actions_used": report.get("total_actions_used"),
                 "unique_actions_used": report.get("unique_actions_used")
@@ -167,6 +168,7 @@ def scan_security():
             "report_file": report.get("report_file"),
             "summary": {
                 "total_repositories": report.get("total_repositories"),
+                "archived_repositories": report.get("archived_repositories", 0),
                 "advanced_security_enabled": report.get("security_features", {}).get("advanced_security_enabled", 0),
                 "secret_scanning_enabled": report.get("security_features", {}).get("secret_scanning_enabled", 0),
                 "total_security_alerts": sum([

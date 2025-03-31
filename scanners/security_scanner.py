@@ -110,10 +110,25 @@ class GitHubSecurityAnalyzer(BaseScanner):
         if rate_limit:
             logger.info(f"API calls remaining: {rate_limit.get('remaining', 0)}")
         
+        # Track archived repositories
+        archived_repos_count = 0
+        archived_with_advanced_security = 0
+        archived_with_secret_scanning = 0
+        archived_with_push_protection = 0
+        archived_with_vuln_alerts = 0
+        archived_with_auto_fixes = 0
+        
+        # Track archived repos with alerts
+        archived_with_secret_alerts = 0
+        archived_with_code_alerts = 0
+        archived_with_dependabot_alerts = 0
+        
         # Initialize data structures
         security_data = {
             'org': self.org,
             'total_repositories': len(repos),
+            'archived_repositories': 0,  # Will update this
+            'active_repositories': 0,    # Will update this
             'security_features': {
                 'advanced_security_enabled': 0,
                 'secret_scanning_enabled': 0,
@@ -129,7 +144,18 @@ class GitHubSecurityAnalyzer(BaseScanner):
                 'total_code_scanning_alerts': 0,
                 'total_dependabot_alerts': 0
             },
+            'archive_stats': {
+                'archived_with_advanced_security': 0,
+                'archived_with_secret_scanning': 0,
+                'archived_with_push_protection': 0,
+                'archived_with_vulnerability_alerts': 0,
+                'archived_with_auto_fixes': 0,
+                'archived_with_secret_alerts': 0,
+                'archived_with_code_alerts': 0,
+                'archived_with_dependabot_alerts': 0
+            },
             'repositories': [],
+            'repository_metadata': {},  # Will store detailed repo metadata
             'repo_limit_applied': limit if limit > 0 else None
         }
         
@@ -220,12 +246,30 @@ class GitHubSecurityAnalyzer(BaseScanner):
         # Now process repositories for security features
         for repo in repos:
             repo_name = repo['name']
+            is_archived = repo.get('archived', False)
+            
+            # Track archived repositories
+            if is_archived:
+                archived_repos_count += 1
+            
+            # Store repository metadata
+            security_data['repository_metadata'][repo_name] = {
+                'name': repo_name,
+                'url': repo.get('html_url', ''),
+                'private': repo.get('private', False),
+                'archived': is_archived,
+                'created_at': repo.get('created_at', ''),
+                'updated_at': repo.get('updated_at', ''),
+                'pushed_at': repo.get('pushed_at', '')
+            }
+            
             logger.info(f"Processing repository {repo_name}... ({repos.index(repo) + 1}/{len(repos)})")
             
             repo_data = {
                 'name': repo_name,
                 'url': repo['html_url'],
                 'private': repo['private'],
+                'archived': is_archived,
                 'security_features': {},
                 'alerts': {
                     'secret_scanning': repo_to_secret_alerts.get(repo_name, []),
@@ -249,17 +293,54 @@ class GitHubSecurityAnalyzer(BaseScanner):
             # Update org-wide counters
             if repo_data['security_features']['advanced_security']:
                 security_data['security_features']['advanced_security_enabled'] += 1
+                if is_archived:
+                    archived_with_advanced_security += 1
+            
             if repo_data['security_features']['secret_scanning']:
                 security_data['security_features']['secret_scanning_enabled'] += 1
+                if is_archived:
+                    archived_with_secret_scanning += 1
+            
             if repo_data['security_features']['secret_scanning_push_protection']:
                 security_data['security_features']['secret_scanning_push_protection_enabled'] += 1
+                if is_archived:
+                    archived_with_push_protection += 1
+            
             if repo_data['security_features']['vulnerability_alerts']:
                 security_data['security_features']['vulnerability_alerts_enabled'] += 1
+                if is_archived:
+                    archived_with_vuln_alerts += 1
+            
             if repo_data['security_features']['automated_security_fixes']:
                 security_data['security_features']['automated_security_fixes_enabled'] += 1
+                if is_archived:
+                    archived_with_auto_fixes += 1
+            
+            # Track archived repos with alerts
+            if is_archived:
+                if repo_name in repo_to_secret_alerts:
+                    archived_with_secret_alerts += 1
+                if repo_name in repo_to_code_alerts:
+                    archived_with_code_alerts += 1
+                if repo_name in repo_to_dependabot_alerts:
+                    archived_with_dependabot_alerts += 1
             
             # Add to repository list
             security_data['repositories'].append(repo_data)
+        
+        # Update archive stats
+        security_data['archived_repositories'] = archived_repos_count
+        security_data['active_repositories'] = len(repos) - archived_repos_count
+        security_data['archive_stats'] = {
+            'archived_with_advanced_security': archived_with_advanced_security,
+            'archived_with_secret_scanning': archived_with_secret_scanning,
+            'archived_with_push_protection': archived_with_push_protection,
+            'archived_with_vulnerability_alerts': archived_with_vuln_alerts,
+            'archived_with_auto_fixes': archived_with_auto_fixes,
+            'archived_with_secret_alerts': archived_with_secret_alerts,
+            'archived_with_code_alerts': archived_with_code_alerts,
+            'archived_with_dependabot_alerts': archived_with_dependabot_alerts
+        }
         
         # Add aggregated data
         security_data['top_vulnerabilities'] = {
@@ -271,6 +352,8 @@ class GitHubSecurityAnalyzer(BaseScanner):
         
         # Calculate percentages
         total_repos = security_data['total_repositories']
+        active_repos = security_data['active_repositories']
+        
         if total_repos > 0:
             security_data['security_features']['advanced_security_percentage'] = round(
                 (security_data['security_features']['advanced_security_enabled'] / total_repos) * 100, 2
@@ -287,6 +370,27 @@ class GitHubSecurityAnalyzer(BaseScanner):
             security_data['security_features']['automated_security_fixes_percentage'] = round(
                 (security_data['security_features']['automated_security_fixes_enabled'] / total_repos) * 100, 2
             )
+            
+            # Calculate percentages for active repos
+            if active_repos > 0:
+                active_with_advanced_security = security_data['security_features']['advanced_security_enabled'] - archived_with_advanced_security
+                active_with_secret_scanning = security_data['security_features']['secret_scanning_enabled'] - archived_with_secret_scanning
+                active_with_push_protection = security_data['security_features']['secret_scanning_push_protection_enabled'] - archived_with_push_protection
+                active_with_vuln_alerts = security_data['security_features']['vulnerability_alerts_enabled'] - archived_with_vuln_alerts
+                active_with_auto_fixes = security_data['security_features']['automated_security_fixes_enabled'] - archived_with_auto_fixes
+                
+                security_data['active_security_features'] = {
+                    'active_with_advanced_security': active_with_advanced_security,
+                    'active_with_secret_scanning': active_with_secret_scanning,
+                    'active_with_push_protection': active_with_push_protection,
+                    'active_with_vuln_alerts': active_with_vuln_alerts,
+                    'active_with_auto_fixes': active_with_auto_fixes,
+                    'active_advanced_security_percentage': round((active_with_advanced_security / active_repos) * 100, 2),
+                    'active_secret_scanning_percentage': round((active_with_secret_scanning / active_repos) * 100, 2),
+                    'active_push_protection_percentage': round((active_with_push_protection / active_repos) * 100, 2),
+                    'active_vuln_alerts_percentage': round((active_with_vuln_alerts / active_repos) * 100, 2),
+                    'active_auto_fixes_percentage': round((active_with_auto_fixes / active_repos) * 100, 2)
+                }
         
         return security_data
         
@@ -304,13 +408,40 @@ class GitHubSecurityAnalyzer(BaseScanner):
         if data.get('repo_limit_applied'):
             logger.info(f"Note: Repository limit of {data['repo_limit_applied']} was applied")
         
-        logger.info("\nSecurity Features:")
-        logger.info(f"  Total repositories: {data['total_repositories']}")
+        # Repository breakdown
+        total_repos = data['total_repositories']
+        archived_repos = data['archived_repositories']
+        active_repos = data['active_repositories']
+        
+        logger.info("\nRepository Breakdown:")
+        logger.info(f"  Total repositories: {total_repos}")
+        logger.info(f"  Archived repositories: {archived_repos} ({(archived_repos / total_repos * 100):.1f}% of total)")
+        logger.info(f"  Active repositories: {active_repos} ({(active_repos / total_repos * 100):.1f}% of total)")
+        
+        logger.info("\nSecurity Features (All Repositories):")
         logger.info(f"  Advanced Security enabled: {data['security_features']['advanced_security_enabled']} ({data['security_features'].get('advanced_security_percentage', 0)}%)")
         logger.info(f"  Secret Scanning enabled: {data['security_features']['secret_scanning_enabled']} ({data['security_features'].get('secret_scanning_percentage', 0)}%)")
         logger.info(f"  Secret Scanning Push Protection enabled: {data['security_features']['secret_scanning_push_protection_enabled']} ({data['security_features'].get('secret_scanning_push_protection_percentage', 0)}%)")
         logger.info(f"  Vulnerability Alerts enabled: {data['security_features']['vulnerability_alerts_enabled']} ({data['security_features'].get('vulnerability_alerts_percentage', 0)}%)")
         logger.info(f"  Automated Security Fixes enabled: {data['security_features']['automated_security_fixes_enabled']} ({data['security_features'].get('automated_security_fixes_percentage', 0)}%)")
+        
+        # Security features for active repositories
+        if active_repos > 0 and 'active_security_features' in data:
+            logger.info("\nSecurity Features (Active Repositories Only):")
+            logger.info(f"  Advanced Security enabled: {data['active_security_features']['active_with_advanced_security']} ({data['active_security_features']['active_advanced_security_percentage']}%)")
+            logger.info(f"  Secret Scanning enabled: {data['active_security_features']['active_with_secret_scanning']} ({data['active_security_features']['active_secret_scanning_percentage']}%)")
+            logger.info(f"  Secret Scanning Push Protection: {data['active_security_features']['active_with_push_protection']} ({data['active_security_features']['active_push_protection_percentage']}%)")
+            logger.info(f"  Vulnerability Alerts enabled: {data['active_security_features']['active_with_vuln_alerts']} ({data['active_security_features']['active_vuln_alerts_percentage']}%)")
+            logger.info(f"  Automated Security Fixes: {data['active_security_features']['active_with_auto_fixes']} ({data['active_security_features']['active_auto_fixes_percentage']}%)")
+        
+        # Security features for archived repositories
+        if archived_repos > 0:
+            logger.info("\nSecurity Features (Archived Repositories Only):")
+            logger.info(f"  Advanced Security enabled: {data['archive_stats']['archived_with_advanced_security']} ({(data['archive_stats']['archived_with_advanced_security'] / archived_repos * 100):.1f}%)")
+            logger.info(f"  Secret Scanning enabled: {data['archive_stats']['archived_with_secret_scanning']} ({(data['archive_stats']['archived_with_secret_scanning'] / archived_repos * 100):.1f}%)")
+            logger.info(f"  Secret Scanning Push Protection: {data['archive_stats']['archived_with_push_protection']} ({(data['archive_stats']['archived_with_push_protection'] / archived_repos * 100):.1f}%)")
+            logger.info(f"  Vulnerability Alerts enabled: {data['archive_stats']['archived_with_vulnerability_alerts']} ({(data['archive_stats']['archived_with_vulnerability_alerts'] / archived_repos * 100):.1f}%)")
+            logger.info(f"  Automated Security Fixes: {data['archive_stats']['archived_with_auto_fixes']} ({(data['archive_stats']['archived_with_auto_fixes'] / archived_repos * 100):.1f}%)")
         
         logger.info("\nAlert Summary:")
         logger.info(f"  Repositories with Secret Scanning alerts: {data['alert_counts']['repositories_with_secret_alerts']}")
@@ -319,6 +450,13 @@ class GitHubSecurityAnalyzer(BaseScanner):
         logger.info(f"  Total Secret Scanning alerts: {data['alert_counts']['total_secret_scanning_alerts']}")
         logger.info(f"  Total Code Scanning alerts: {data['alert_counts']['total_code_scanning_alerts']}")
         logger.info(f"  Total Dependabot alerts: {data['alert_counts']['total_dependabot_alerts']}")
+        
+        # Alerts in archived repositories
+        if archived_repos > 0:
+            logger.info("\nAlerts in Archived Repositories:")
+            logger.info(f"  Archived repositories with Secret Scanning alerts: {data['archive_stats']['archived_with_secret_alerts']} ({(data['archive_stats']['archived_with_secret_alerts'] / archived_repos * 100):.1f}%)")
+            logger.info(f"  Archived repositories with Code Scanning alerts: {data['archive_stats']['archived_with_code_alerts']} ({(data['archive_stats']['archived_with_code_alerts'] / archived_repos * 100):.1f}%)")
+            logger.info(f"  Archived repositories with Dependabot alerts: {data['archive_stats']['archived_with_dependabot_alerts']} ({(data['archive_stats']['archived_with_dependabot_alerts'] / archived_repos * 100):.1f}%)")
         
         if data['top_vulnerabilities']['secret_types']:
             logger.info("\nTop Secret Types:")
