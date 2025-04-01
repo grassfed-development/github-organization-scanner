@@ -365,3 +365,208 @@ def scan_all_orgs():
                         "status": "error",
                         "error": str(e)
                     }
+            
+            # Add organization result to overall results
+            results["organizations"].append(org_result)
+        
+        # Add completion timestamp
+        results["scan_completed_at"] = datetime.now().isoformat()
+        
+        return jsonify(results), 200
+    
+    except Exception as e:
+        logger.exception(f"Error in scan_all_orgs: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/vault/status', methods=['GET'])
+def vault_status():
+    """Get status of the Vault integration"""
+    vault_status = {
+        "available": DEFAULT_CONFIG['VAULT_ENABLED'],
+        "environment": DEFAULT_CONFIG['ENV']
+    }
+    
+    if vault_client:
+        vault_status.update({
+            "url": vault_client.url,
+            "authenticated": vault_client.is_available(),
+            "mount_point": vault_client.mount_point
+        })
+    
+    return jsonify(vault_status), 200
+
+@app.route('/tokens/status', methods=['GET'])
+def token_status():
+    """Get status of all tokens and their rate limits"""
+    if not token_manager:
+        return jsonify({
+            "token_manager": "disabled",
+            "single_token": {
+                "available": bool(DEFAULT_CONFIG['GITHUB_TOKEN']),
+                "rate_limit": "Use the /rate_limit endpoint for details"
+            },
+            "token_source": "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "environment"
+        }), 200
+    
+    try:
+        # Get rate limits for all tokens (obscure actual tokens)
+        token_limits = token_manager.get_all_rate_limits()
+        
+        # Add count by scope
+        scope_counts = {}
+        for scope, tokens in DEFAULT_CONFIG['GITHUB_TOKENS_BY_SCOPE'].items():
+            scope_counts[scope] = len(tokens)
+        
+        return jsonify({
+            "token_manager": "enabled",
+            "tokens_by_scope": scope_counts,
+            "total_tokens": len(token_manager.all_tokens),
+            "token_rate_limits": token_limits,
+            "token_source": "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "environment"
+        }), 200
+    except Exception as e:
+        logger.exception(f"Error getting token status: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/', methods=['GET'])
+def index():
+    """Default route with usage information"""
+    return jsonify({
+        "service": "GitHub Security Scanner",
+        "version": "2.2.0",  # Bumped version for Vault integration
+        "usage": {
+            "list_organizations": "GET /organizations",
+            "scan_all_organizations": "POST /scan/all",
+            "scan_actions": "POST /scan/actions",
+            "scan_security": "POST /scan/security",
+            "vault_status": "GET /vault/status",
+            "token_status": "GET /tokens/status"
+        },
+        "token_manager": "enabled" if token_manager else "disabled",
+        "vault_integration": "enabled" if DEFAULT_CONFIG['VAULT_ENABLED'] else "disabled",
+        "environment": DEFAULT_CONFIG['ENV']
+    }), 200
+
+def run_local():
+    """Run scanners locally for testing"""
+    if not DEFAULT_CONFIG['GITHUB_TOKEN'] and not token_manager:
+        logger.error("Missing required GitHub token configuration")
+        return
+    
+    storage_client = GCSClient(DEFAULT_CONFIG['GCS_BUCKET']) if DEFAULT_CONFIG['GCS_BUCKET'] else None
+    repo_limit = DEFAULT_CONFIG['REPO_LIMIT']
+    
+    if repo_limit > 0:
+        logger.info(f"Repository limit set to {repo_limit}")
+    
+    # Create a GitHub client without specifying an org
+    if token_manager:
+        client = GitHubClient(org="", token_manager=token_manager, base_url=DEFAULT_CONFIG['BASE_URL'])
+        logger.info("Using token manager for API requests")
+    else:
+        client = GitHubClient(token=DEFAULT_CONFIG['GITHUB_TOKEN'], org="")
+        logger.info("Using single token mode for API requests")
+    
+    # Get a list of organizations
+    logger.info("Fetching accessible organizations...")
+    url = f"{client.base_url}/user/orgs"
+    response = client.make_request(url)
+    
+    if response.status_code != 200:
+        logger.error(f"Failed to get organizations: {response.text}")
+        return
+        
+    organizations = response.json()
+    
+    if not organizations:
+        logger.error("No organizations found for the user")
+        return
+    
+    logger.info(f"Found {len(organizations)} organizations")
+    
+    # Set a specific org if provided, otherwise process all orgs
+    target_orgs = []
+    if DEFAULT_CONFIG['GITHUB_ORG']:
+        target_orgs = [DEFAULT_CONFIG['GITHUB_ORG']]
+        logger.info(f"Using specified organization: {DEFAULT_CONFIG['GITHUB_ORG']}")
+    else:
+        target_orgs = [org['login'] for org in organizations]
+        logger.info(f"Processing all {len(target_orgs)} organizations")
+    
+    for org_name in target_orgs:
+        logger.info(f"Processing organization: {org_name}")
+        
+        # Run Actions scanner
+        logger.info(f"Running GitHub Actions scan for {org_name}...")
+        if token_manager:
+            # Create GitHub client with token manager
+            github_client = GitHubClient(org=org_name, token_manager=token_manager, base_url=DEFAULT_CONFIG['BASE_URL'])
+            actions_analyzer = GitHubActionsAnalyzer(client=github_client, storage_client=storage_client, repo_limit=repo_limit)
+        else:
+            # Legacy single token mode
+            actions_analyzer = GitHubActionsAnalyzer(DEFAULT_CONFIG['GITHUB_TOKEN'], org_name, storage_client, repo_limit)
+            
+        actions_analyzer.generate_report()
+        
+        # Run Security scanner
+        logger.info(f"Running GitHub Security scan for {org_name}...")
+        if token_manager:
+            # Create GitHub client with token manager
+            github_client = GitHubClient(org=org_name, token_manager=token_manager, base_url=DEFAULT_CONFIG['BASE_URL'])
+            security_analyzer = GitHubSecurityAnalyzer(client=github_client, storage_client=storage_client, repo_limit=repo_limit)
+        else:
+            # Legacy single token mode
+            security_analyzer = GitHubSecurityAnalyzer(DEFAULT_CONFIG['GITHUB_TOKEN'], org_name, storage_client, repo_limit)
+            
+        security_analyzer.generate_report()
+
+if __name__ == '__main__':
+    import sys
+    
+    parser = argparse.ArgumentParser(description="GitHub Organization Scanner")
+    parser.add_argument('mode', nargs='?', default='server', choices=['local', 'server'], 
+                      help="Run mode: 'local' for local scanning, 'server' for web server")
+    parser.add_argument('--limit', type=int, default=DEFAULT_CONFIG['REPO_LIMIT'],
+                      help="Limit the number of repositories to scan")
+    parser.add_argument('--token-status', action='store_true',
+                      help="Show status of available tokens and exit")
+    
+    args = parser.parse_args()
+    
+    # Override repo limit if specified on command line
+    if args.limit > 0:
+        DEFAULT_CONFIG['REPO_LIMIT'] = args.limit
+    
+    # Just show token status if requested
+    if args.token_status:
+        logger.info(f"Environment: {DEFAULT_CONFIG['ENV']}")
+        logger.info(f"Vault integration: {'Enabled' if DEFAULT_CONFIG['VAULT_ENABLED'] else 'Disabled'}")
+        
+        if token_manager:
+            print(f"Token manager enabled with {len(token_manager.all_tokens)} tokens")
+            token_limits = token_manager.get_all_rate_limits()
+            for token_id, limit_info in token_limits.items():
+                print(f"Token {token_id}: {limit_info['remaining']}/{limit_info['limit']} remaining, resets at {datetime.fromtimestamp(limit_info['reset'])}")
+            
+            # Show token counts by scope
+            print("\nTokens by scope:")
+            for scope, tokens in DEFAULT_CONFIG['GITHUB_TOKENS_BY_SCOPE'].items():
+                if tokens:
+                    print(f"  {scope}: {len(tokens)} tokens")
+            
+            print(f"\nToken source: {'Vault' if DEFAULT_CONFIG['VAULT_ENABLED'] else 'Environment variables'}")
+        else:
+            print("Token manager disabled. Using single token mode.")
+            if DEFAULT_CONFIG['GITHUB_TOKEN']:
+                print("Single token available.")
+                print(f"Token source: {'Vault' if DEFAULT_CONFIG['VAULT_ENABLED'] else 'Environment variables'}")
+            else:
+                print("No token available! Please set GITHUB_TOKEN in your environment or configure Vault.")
+        sys.exit(0)
+        
+    if args.mode == 'local' or (len(sys.argv) > 1 and sys.argv[1] == 'local'):
+        # Run scanners locally
+        run_local()
+    else:
+        # Run Flask app
+        app.run(host='0.0.0.0', port=DEFAULT_CONFIG['PORT'], debug=DEFAULT_CONFIG['DEBUG'])
