@@ -17,7 +17,7 @@ from scanners.actions_scanner import GitHubActionsAnalyzer
 from scanners.security_scanner import GitHubSecurityAnalyzer
 from storage.gcs_client import GCSClient
 from utils.logger import setup_logger
-from config import GITHUB_TOKENS_BY_SCOPE, GITHUB_TOKEN, ENV, vault_client
+from config import GITHUB_TOKENS_BY_SCOPE, GITHUB_TOKEN, ENV, vault_client, gcp_secret_client
 
 app = Flask(__name__)
 
@@ -34,7 +34,8 @@ DEFAULT_CONFIG = {
     'REPORTS_DIR': os.environ.get('REPORTS_DIR', 'reports'),
     'REPO_LIMIT': int(os.environ.get('REPO_LIMIT', 0)),  # 0 means no limit
     'ENV': ENV,
-    'VAULT_ENABLED': vault_client is not None and vault_client.is_available()
+    'VAULT_ENABLED': vault_client is not None and vault_client.is_available(),
+    'GCP_SECRET_ENABLED': gcp_secret_client is not None and gcp_secret_client.is_available()
 }
 
 # Check if token is available
@@ -47,7 +48,10 @@ if not DEFAULT_CONFIG['GITHUB_TOKEN'] and not DEFAULT_CONFIG['GITHUB_TOKENS_BY_S
     print("   - Authentication: VAULT_TOKEN, VAULT_ROLE_ID/VAULT_SECRET_ID, or Kubernetes auth")
     print("   - VAULT_GITHUB_MOUNT: The mount point for GitHub tokens (default: github)")
     print("")
-    print("2. Environment Variables (fallback):")
+    print("2. Google Cloud Secret Manager (alternative):")
+    print("   - GCP_PROJECT_ID: ID of your Google Cloud project")
+    print("")
+    print("3. Environment Variables (fallback):")
     print("   - GITHUB_TOKEN: Single GitHub token")
     print("   - Scoped tokens: GITHUB_TOKENS_REPO, GITHUB_TOKENS_SECURITY_EVENTS, etc.")
     print("")
@@ -86,16 +90,18 @@ if DEFAULT_CONFIG['GITHUB_TOKENS_BY_SCOPE']:
 # Log environment information
 logger.info(f"Running in {DEFAULT_CONFIG['ENV']} environment")
 logger.info(f"Vault integration: {'Enabled' if DEFAULT_CONFIG['VAULT_ENABLED'] else 'Disabled'}")
+logger.info(f"GCP Secret Manager integration: {'Enabled' if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else 'Disabled'}")
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    token_source = "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "environment"
+    token_source = "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "gcp_secret" if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else "environment"
     return jsonify({
         "status": "healthy", 
         "environment": DEFAULT_CONFIG['ENV'],
         "token_source": token_source,
         "vault_available": DEFAULT_CONFIG['VAULT_ENABLED'],
+        "gcp_secret_available": DEFAULT_CONFIG['GCP_SECRET_ENABLED'],
         "tokens_available": bool(DEFAULT_CONFIG['GITHUB_TOKEN']) or bool(DEFAULT_CONFIG['GITHUB_TOKENS_BY_SCOPE'])
     }), 200
 
@@ -395,17 +401,36 @@ def vault_status():
     
     return jsonify(vault_status), 200
 
+@app.route('/gcp-secret/status', methods=['GET'])
+def gcp_secret_status():
+    """Get status of the GCP Secret Manager integration"""
+    gcp_status = {
+        "available": DEFAULT_CONFIG['GCP_SECRET_ENABLED'],
+        "environment": DEFAULT_CONFIG['ENV']
+    }
+    
+    if gcp_secret_client:
+        gcp_status.update({
+            "project_id": gcp_secret_client.project_id,
+            "client_initialized": gcp_secret_client.client is not None
+        })
+    
+    return jsonify(gcp_status), 200
+
 @app.route('/tokens/status', methods=['GET'])
 def token_status():
     """Get status of all tokens and their rate limits"""
     if not token_manager:
+        # Determine token source
+        token_source = "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "gcp_secret" if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else "environment"
+        
         return jsonify({
             "token_manager": "disabled",
             "single_token": {
                 "available": bool(DEFAULT_CONFIG['GITHUB_TOKEN']),
                 "rate_limit": "Use the /rate_limit endpoint for details"
             },
-            "token_source": "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "environment"
+            "token_source": token_source
         }), 200
     
     try:
@@ -417,12 +442,15 @@ def token_status():
         for scope, tokens in DEFAULT_CONFIG['GITHUB_TOKENS_BY_SCOPE'].items():
             scope_counts[scope] = len(tokens)
         
+        # Determine token source
+        token_source = "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "gcp_secret" if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else "environment"
+        
         return jsonify({
             "token_manager": "enabled",
             "tokens_by_scope": scope_counts,
             "total_tokens": len(token_manager.all_tokens),
             "token_rate_limits": token_limits,
-            "token_source": "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "environment"
+            "token_source": token_source
         }), 200
     except Exception as e:
         logger.exception(f"Error getting token status: {str(e)}")
@@ -431,19 +459,25 @@ def token_status():
 @app.route('/', methods=['GET'])
 def index():
     """Default route with usage information"""
+    # Determine token source
+    token_source = "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "gcp_secret" if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else "environment"
+    
     return jsonify({
         "service": "GitHub Security Scanner",
-        "version": "2.2.0",  # Bumped version for Vault integration
+        "version": "2.3.0",  # Bumped version for GCP Secret Manager integration
         "usage": {
             "list_organizations": "GET /organizations",
             "scan_all_organizations": "POST /scan/all",
             "scan_actions": "POST /scan/actions",
             "scan_security": "POST /scan/security",
             "vault_status": "GET /vault/status",
+            "gcp_secret_status": "GET /gcp-secret/status",
             "token_status": "GET /tokens/status"
         },
         "token_manager": "enabled" if token_manager else "disabled",
         "vault_integration": "enabled" if DEFAULT_CONFIG['VAULT_ENABLED'] else "disabled",
+        "gcp_secret_integration": "enabled" if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else "disabled",
+        "token_source": token_source,
         "environment": DEFAULT_CONFIG['ENV']
     }), 200
 
@@ -541,6 +575,7 @@ if __name__ == '__main__':
     if args.token_status:
         logger.info(f"Environment: {DEFAULT_CONFIG['ENV']}")
         logger.info(f"Vault integration: {'Enabled' if DEFAULT_CONFIG['VAULT_ENABLED'] else 'Disabled'}")
+        logger.info(f"GCP Secret Manager integration: {'Enabled' if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else 'Disabled'}")
         
         if token_manager:
             print(f"Token manager enabled with {len(token_manager.all_tokens)} tokens")
@@ -554,14 +589,18 @@ if __name__ == '__main__':
                 if tokens:
                     print(f"  {scope}: {len(tokens)} tokens")
             
-            print(f"\nToken source: {'Vault' if DEFAULT_CONFIG['VAULT_ENABLED'] else 'Environment variables'}")
+            # Determine token source
+            token_source = "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "gcp_secret" if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else "environment variables"
+            print(f"\nToken source: {token_source}")
         else:
             print("Token manager disabled. Using single token mode.")
             if DEFAULT_CONFIG['GITHUB_TOKEN']:
                 print("Single token available.")
-                print(f"Token source: {'Vault' if DEFAULT_CONFIG['VAULT_ENABLED'] else 'Environment variables'}")
+                # Determine token source
+                token_source = "vault" if DEFAULT_CONFIG['VAULT_ENABLED'] else "gcp_secret" if DEFAULT_CONFIG['GCP_SECRET_ENABLED'] else "environment variables"
+                print(f"Token source: {token_source}")
             else:
-                print("No token available! Please set GITHUB_TOKEN in your environment or configure Vault.")
+                print("No token available! Please set GITHUB_TOKEN in your environment or configure Vault or GCP Secret Manager.")
         sys.exit(0)
         
     if args.mode == 'local' or (len(sys.argv) > 1 and sys.argv[1] == 'local'):

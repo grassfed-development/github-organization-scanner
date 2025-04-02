@@ -1,6 +1,7 @@
 requests==2.32.2
 PyYAML==6.0.1
 google-cloud-storage==2.14.0
+google-cloud-secret-manager==2.16.1
 python-dotenv==1.0.0
 gunicorn==23.0.0
 Flask==2.3.3

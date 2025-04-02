@@ -2,6 +2,7 @@ import os
 import logging
 from typing import List, Dict, Optional
 from utils.vault_client import VaultClient
+from utils.gcp_secret_client import GCPSecretClient
 
 logger = logging.getLogger(__name__)
 
@@ -16,12 +17,24 @@ try:
         mount_point=os.environ.get('VAULT_GITHUB_MOUNT', 'github')
     )
     if not vault_client.is_available():
-        logger.warning("Vault client initialization failed, will fall back to environment variables")
+        logger.warning("Vault client initialization failed, will try GCP Secret Manager")
 except Exception as e:
     logger.error(f"Error initializing Vault client: {str(e)}")
     vault_client = None
 
-# Get tokens from appropriate source (Vault first, environment variables as fallback)
+# Initialize GCP Secret Manager client as secondary token source
+gcp_secret_client = None
+if not vault_client or not vault_client.is_available():
+    try:
+        logger.info(f"Initializing GCP Secret Manager client in {ENV} environment")
+        gcp_secret_client = GCPSecretClient()
+        if not gcp_secret_client.is_available():
+            logger.warning("GCP Secret Manager client initialization failed, will fall back to environment variables")
+    except Exception as e:
+        logger.error(f"Error initializing GCP Secret Manager client: {str(e)}")
+        gcp_secret_client = None
+
+# Get tokens from appropriate source (Vault first, GCP Secret Manager second, environment variables as last resort)
 GITHUB_TOKENS_BY_SCOPE = {}
 GITHUB_TOKEN = None
 
@@ -38,11 +51,23 @@ if vault_client and vault_client.is_available():
         logger.info("Retrieved single GitHub token from Vault")
     
     if not GITHUB_TOKENS_BY_SCOPE and not GITHUB_TOKEN:
-        logger.warning("No tokens found in Vault, will try environment variables")
+        logger.warning("No tokens found in Vault, will try GCP Secret Manager")
+elif gcp_secret_client and gcp_secret_client.is_available():
+    # Get tokens from GCP Secret Manager
+    logger.info("Retrieving GitHub tokens from GCP Secret Manager")
+    GITHUB_TOKENS_BY_SCOPE = gcp_secret_client.get_github_tokens()
+    
+    # Get single token from GCP Secret Manager for backward compatibility
+    GITHUB_TOKEN = gcp_secret_client.get_secret('github-token')
+    if GITHUB_TOKEN:
+        logger.info("Retrieved single GitHub token from GCP Secret Manager")
+    
+    if not GITHUB_TOKENS_BY_SCOPE and not GITHUB_TOKEN:
+        logger.warning("No tokens found in GCP Secret Manager, will try environment variables")
 else:
-    logger.info("Vault not available, falling back to environment variables")
+    logger.info("Vault and GCP Secret Manager not available, falling back to environment variables")
 
-# If no tokens from Vault or Vault not available, try environment variables
+# If no tokens from Vault or GCP Secret Manager, try environment variables
 if not GITHUB_TOKENS_BY_SCOPE and not GITHUB_TOKEN:
     # Get single token from environment (for backward compatibility)
     GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
@@ -115,10 +140,17 @@ LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
 
 # Log token configuration (without exposing tokens)
 vault_source = vault_client and vault_client.is_available() and (bool(GITHUB_TOKEN) or bool(GITHUB_TOKENS_BY_SCOPE))
+gcp_source = gcp_secret_client and gcp_secret_client.is_available() and (bool(GITHUB_TOKEN) or bool(GITHUB_TOKENS_BY_SCOPE))
 env_source = bool(GITHUB_TOKEN) or bool(GITHUB_TOKENS_BY_SCOPE)
 
 logger.info(f"Environment: {ENV}")
-logger.info(f"Token source: {'Vault' if vault_source else 'Environment variables'}")
+if vault_source:
+    logger.info("Token source: Vault")
+elif gcp_source:
+    logger.info("Token source: GCP Secret Manager")
+else:
+    logger.info("Token source: Environment variables")
+
 logger.info(f"Single token available: {GITHUB_TOKEN is not None}")
 logger.info(f"Scoped tokens: {', '.join(GITHUB_TOKENS_BY_SCOPE.keys()) if GITHUB_TOKENS_BY_SCOPE else 'None'}")
 for scope, tokens in GITHUB_TOKENS_BY_SCOPE.items():
